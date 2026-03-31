@@ -1,0 +1,7 @@
+# Environment config (contains API token)
+.env
+
+# Test output directory
+tests/pdf-demo-output/
+
+__pycache__/
