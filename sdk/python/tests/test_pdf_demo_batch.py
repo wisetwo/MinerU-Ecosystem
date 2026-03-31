@@ -1,8 +1,22 @@
 """Batch PDF-demo → Markdown test — high-accuracy (VLM) mode.
 
 This script reads every PDF in ``tests/pdf-demo/``, sends them to the MinerU
-API using the high-accuracy **vlm** model, and saves the Markdown output
-alongside the original files.
+API using the high-accuracy **vlm** model, and saves full results into
+per-PDF output directories.
+
+Output structure::
+
+    tests/pdf-demo-output/
+    ├── 小米集团-1810-2024年年报-demo/
+    │   ├── 小米集团-1810-2024年年报-demo.md      # Markdown
+    │   ├── content_list.json                     # Structured content list
+    │   ├── images/                               # Extracted images
+    │   │   ├── img_0.jpg
+    │   │   └── ...
+    │   └── raw/                                  # Full original zip contents
+    │       └── ...
+    └── 拼多多-PDD-2024年年报-demo/
+        └── ...
 
 API Token configuration (pick ONE):
   1. Environment variable:  export MINERU_TOKEN="your-token-here"
@@ -17,6 +31,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -69,6 +84,87 @@ def _collect_pdfs() -> list[Path]:
     if not PDF_DEMO_DIR.is_dir():
         return []
     return sorted(PDF_DEMO_DIR.glob("*.pdf"))
+
+
+def _save_result(result: ExtractResult, output_dir: Path, stem: str) -> dict:
+    """Save all result data to a per-PDF directory. Returns a summary dict.
+
+    Directory layout:
+        {output_dir}/{stem}/
+        ├── {stem}.md              # Markdown output
+        ├── content_list.json      # Structured element list (if available)
+        ├── metadata.json          # Task metadata (task_id, state, etc.)
+        ├── images/                # Extracted images (if any)
+        │   ├── img_0.jpg
+        │   └── ...
+        └── raw/                   # Full original API zip contents
+            └── ...
+    """
+    pdf_dir = output_dir / stem
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: dict = {"stem": stem, "task_id": result.task_id, "state": result.state}
+
+    # ── 1. Markdown ──
+    if result.markdown is not None:
+        md_path = pdf_dir / f"{stem}.md"
+        md_path.write_text(result.markdown, encoding="utf-8")
+        summary["markdown_size"] = len(result.markdown)
+
+    # ── 2. Images (per-PDF isolated images/ directory) ──
+    if result.images:
+        img_dir = pdf_dir / "images"
+        img_dir.mkdir(exist_ok=True)
+        for img in result.images:
+            (img_dir / img.name).write_bytes(img.data)
+        summary["image_count"] = len(result.images)
+
+    # ── 3. content_list.json — structured intermediate data ──
+    if result.content_list is not None:
+        cl_path = pdf_dir / "content_list.json"
+        cl_path.write_text(
+            json.dumps(result.content_list, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        summary["content_list_items"] = len(result.content_list)
+
+    # ── 4. Metadata (task-level info for later inspection) ──
+    meta = {
+        "task_id": result.task_id,
+        "state": result.state,
+        "filename": result.filename,
+        "err_code": result.err_code,
+        "error": result.error,
+        "zip_url": result.zip_url,
+        "progress": (
+            {
+                "extracted_pages": result.progress.extracted_pages,
+                "total_pages": result.progress.total_pages,
+                "start_time": result.progress.start_time,
+            }
+            if result.progress
+            else None
+        ),
+        "has_markdown": result.markdown is not None,
+        "has_content_list": result.content_list is not None,
+        "image_count": len(result.images),
+        "has_docx": result.docx is not None,
+        "has_html": result.html is not None,
+        "has_latex": result.latex is not None,
+    }
+    meta_path = pdf_dir / "metadata.json"
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # ── 5. Raw zip contents (full API output) ──
+    if result._zip_bytes is not None:
+        raw_dir = pdf_dir / "raw"
+        result.save_all(str(raw_dir))
+        summary["raw_extracted"] = True
+
+    return summary
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -143,7 +239,7 @@ class TestPdfDemoBatchConvert:
 
 
 class TestPdfDemoSingleConvert:
-    """Convert each PDF individually and save the Markdown output."""
+    """Convert each PDF individually and save full results per PDF."""
 
     @pytest.fixture(autouse=True)
     def _setup_output_dir(self):
@@ -151,7 +247,7 @@ class TestPdfDemoSingleConvert:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     def test_convert_and_save_each_pdf(self, client, pdf_files):
-        """Convert each PDF one-by-one and save markdown to pdf-demo-output/."""
+        """Convert each PDF one-by-one, save all outputs to per-PDF dirs."""
         succeeded = []
         failed = []
 
@@ -175,14 +271,17 @@ class TestPdfDemoSingleConvert:
                 )
                 assert result.markdown is not None
 
-                # Save markdown
-                md_path = OUTPUT_DIR / f"{stem}.md"
-                result.save_markdown(str(md_path), with_images=True)
+                # Save all results to isolated per-PDF directory
+                summary = _save_result(result, OUTPUT_DIR, stem)
 
-                md_size = md_path.stat().st_size
-                print(f"  ✅ Saved: {md_path.name}  ({md_size:,} bytes)")
-                if result.images:
-                    print(f"     Images: {len(result.images)} extracted")
+                print(f"  ✅ Output:  {OUTPUT_DIR / stem}/")
+                print(f"     Markdown: {summary.get('markdown_size', 0):,} bytes")
+                if summary.get("image_count"):
+                    print(f"     Images:   {summary['image_count']} files")
+                if summary.get("content_list_items"):
+                    print(f"     Content list: {summary['content_list_items']} elements")
+                if summary.get("raw_extracted"):
+                    print(f"     Raw zip:  extracted to raw/")
                 succeeded.append(pdf_path.name)
 
             except Exception as e:
@@ -199,7 +298,7 @@ class TestPdfDemoSingleConvert:
         if failed:
             for name, err in failed:
                 print(f"    - {name}: {err}")
-        print(f"  Output:    {OUTPUT_DIR}")
+        print(f"  Output:    {OUTPUT_DIR}/")
         print(f"{'═'*60}\n")
 
         assert len(failed) == 0, f"{len(failed)} file(s) failed: {failed}"
