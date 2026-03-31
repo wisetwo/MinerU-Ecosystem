@@ -3,8 +3,11 @@ import * as pdfjsLib from 'pdfjs-dist';
 import type { ContentListItem } from '../types';
 import { TYPE_COLORS, TYPE_LABELS } from '../types';
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+// Configure PDF.js worker — use local file bundled by Vite instead of CDN
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url
+).toString();
 
 interface Props {
   pdfFile: File | null;
