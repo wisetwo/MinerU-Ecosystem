@@ -48,6 +48,17 @@ OUTPUT_DIR = TESTS_DIR / "pdf-demo-output"
 # ── Settings ──
 # High-accuracy model
 MODEL = "vlm"
+# Document language code — explicitly set to "ch" for Chinese/English/Traditional Chinese.
+# This is critical for correct CJK character recognition. Supported values:
+#   "ch"           — Chinese, English, Chinese Traditional (default on API but best to be explicit)
+#   "chinese_cht"  — Chinese, English, Chinese Traditional, Japanese
+#   "en"           — English only
+#   "japan"        — Chinese, English, Chinese Traditional, Japanese
+#   "korean"       — Korean, English
+# See mcp/src/mineru_open_mcp/language.py for the full list.
+LANGUAGE = "ch"
+# Enable OCR for scanned PDFs or images with embedded text
+ENABLE_OCR = True
 # Generous timeout for large annual reports (20 min per file)
 SINGLE_TIMEOUT = 1200
 BATCH_TIMEOUT = 2400
@@ -210,6 +221,8 @@ class TestPdfDemoBatchConvert:
             client.extract_batch(
                 sources,
                 model=MODEL,
+                language=LANGUAGE,
+                ocr=ENABLE_OCR,
                 timeout=BATCH_TIMEOUT,
             )
         )
@@ -226,6 +239,8 @@ class TestPdfDemoBatchConvert:
             client.extract_batch(
                 sources,
                 model=MODEL,
+                language=LANGUAGE,
+                ocr=ENABLE_OCR,
                 timeout=BATCH_TIMEOUT,
             )
         )
@@ -256,12 +271,16 @@ class TestPdfDemoSingleConvert:
             print(f"\n{'─'*60}")
             print(f"  Converting: {pdf_path.name}")
             print(f"  Model:      {MODEL} (high-accuracy)")
+            print(f"  Language:   {LANGUAGE}")
+            print(f"  OCR:        {ENABLE_OCR}")
             print(f"{'─'*60}")
 
             try:
                 result = client.extract(
                     str(pdf_path),
                     model=MODEL,
+                    language=LANGUAGE,
+                    ocr=ENABLE_OCR,
                     timeout=SINGLE_TIMEOUT,
                 )
 
