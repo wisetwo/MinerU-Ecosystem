@@ -46,7 +46,7 @@ export default function PdfPanel({
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
 
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
-  const [scale, setScale] = useState(1.0);
+  const [scale, setScale] = useState<number | null>(null); // null = not yet computed
   // Natural page sizes — computed once on load, never mutated afterwards
   const [naturalSizes, setNaturalSizes] = useState<Map<number, NaturalPageSize>>(new Map());
   const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
@@ -58,12 +58,16 @@ export default function PdfPanel({
   const currentPageRef = useRef(currentPage);
   currentPageRef.current = currentPage;
 
+  // Effective scale for rendering (fallback to 1 only used before anything renders)
+  const effectiveScale = scale ?? 1.0;
+
   // ─── Load PDF document ───────────────────────────────────────────────
   useEffect(() => {
     if (!pdfFile) {
       setPdfDoc(null);
       setNaturalSizes(new Map());
       setRenderedPages(new Set());
+      setScale(null);
       renderedScaleRef.current.clear();
       return;
     }
@@ -85,7 +89,19 @@ export default function PdfPanel({
         const vp = page.getViewport({ scale: 1.0 });
         sizes.set(i, { width: vp.width, height: vp.height });
       }
-      if (!cancelled) setNaturalSizes(sizes);
+      if (cancelled) return;
+      setNaturalSizes(sizes);
+
+      // Compute initial fit-to-width scale right here, before any render
+      const container = scrollContainerRef.current;
+      const firstPage = sizes.get(1);
+      if (container && firstPage) {
+        const containerWidth = container.clientWidth - 48;
+        const fitScale = Math.min(containerWidth / firstPage.width, 2.0);
+        setScale(fitScale);
+      } else {
+        setScale(1.0);
+      }
     };
 
     loadPdf().catch(console.error);
@@ -93,25 +109,10 @@ export default function PdfPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfFile]);
 
-  // ─── Compute initial scale to fit container width (only once) ────────
-  const initialScaleComputed = useRef(false);
-  useEffect(() => {
-    if (initialScaleComputed.current) return;
-    if (!scrollContainerRef.current || naturalSizes.size === 0) return;
-
-    const containerWidth = scrollContainerRef.current.clientWidth - 48;
-    const firstPage = naturalSizes.get(1);
-    if (!firstPage) return;
-
-    const fitScale = Math.min(containerWidth / firstPage.width, 2.0);
-    setScale(fitScale);
-    initialScaleComputed.current = true;
-  }, [naturalSizes]);
-
   // ─── Render a single page onto its canvas ────────────────────────────
   const renderPage = useCallback(
     async (pageNum: number) => {
-      if (!pdfDoc) return;
+      if (!pdfDoc || scale === null) return;
       // Skip if already rendering or already rendered at current scale
       if (renderingRef.current.has(pageNum)) return;
       if (renderedScaleRef.current.get(pageNum) === scale) return;
@@ -154,7 +155,7 @@ export default function PdfPanel({
 
   // ─── IntersectionObserver: lazy-render pages that enter viewport ─────
   useEffect(() => {
-    if (!pdfDoc || !scrollContainerRef.current || naturalSizes.size === 0) return;
+    if (!pdfDoc || scale === null || !scrollContainerRef.current || naturalSizes.size === 0) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -174,11 +175,11 @@ export default function PdfPanel({
 
     pageRefs.current.forEach((el) => observer.observe(el));
     return () => observer.disconnect();
-  }, [pdfDoc, renderPage, naturalSizes, totalPages]);
+  }, [pdfDoc, renderPage, naturalSizes, totalPages, scale]);
 
   // ─── Re-render when scale changes ───────────────────────────────────
   useEffect(() => {
-    if (!pdfDoc) return;
+    if (!pdfDoc || scale === null) return;
     // Clear rendered-at-scale tracking so pages get re-rendered at new scale
     renderedScaleRef.current.clear();
     setRenderedPages(new Set());
@@ -252,8 +253,8 @@ export default function PdfPanel({
       const nat = naturalSizes.get(pageNum);
       if (!nat) return { left: 0, top: 0, width: 0, height: 0 };
 
-      const displayW = nat.width * scale;
-      const displayH = nat.height * scale;
+      const displayW = nat.width * effectiveScale;
+      const displayH = nat.height * effectiveScale;
       const [x1, y1, x2, y2] = bbox;
       const scaleX = displayW / 1000;
       const scaleY = displayH / 1000;
@@ -265,7 +266,7 @@ export default function PdfPanel({
         height: (y2 - y1) * scaleY,
       };
     },
-    [naturalSizes, scale]
+    [naturalSizes, effectiveScale]
   );
 
   // ─── Memoised index lookup ───────────────────────────────────────────
@@ -278,8 +279,8 @@ export default function PdfPanel({
   const getGlobalIndex = (item: ContentListItem) => contentIndexMap.get(item) ?? -1;
 
   // ─── Zoom handlers ──────────────────────────────────────────────────
-  const handleZoomIn = () => setScale((s) => Math.min(s + 0.2, 3.0));
-  const handleZoomOut = () => setScale((s) => Math.max(s - 0.2, 0.3));
+  const handleZoomIn = () => setScale((s) => Math.min((s ?? 1) + 0.2, 3.0));
+  const handleZoomOut = () => setScale((s) => Math.max((s ?? 1) - 0.2, 0.3));
 
   // ─── Build pages array ──────────────────────────────────────────────
   const pages = useMemo(() => Array.from({ length: totalPages }, (_, i) => i + 1), [totalPages]);
@@ -298,7 +299,7 @@ export default function PdfPanel({
             🔍−
           </button>
           <span className="text-xs text-gray-500 min-w-[40px] text-center">
-            {Math.round(scale * 100)}%
+            {Math.round(effectiveScale * 100)}%
           </span>
           <button onClick={handleZoomIn} className="px-2 py-1 text-sm rounded hover:bg-gray-200">
             🔍+
@@ -327,8 +328,8 @@ export default function PdfPanel({
           <div className="flex flex-col items-center py-4 gap-4">
             {pages.map((pageNum) => {
               const nat = naturalSizes.get(pageNum);
-              const displayW = (nat?.width ?? 595) * scale;
-              const displayH = (nat?.height ?? 842) * scale;
+              const displayW = (nat?.width ?? 595) * effectiveScale;
+              const displayH = (nat?.height ?? 842) * effectiveScale;
 
               // Elements on this page
               const pageElements = showBboxOverlay
