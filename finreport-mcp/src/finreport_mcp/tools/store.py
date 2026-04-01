@@ -142,6 +142,23 @@ class DocumentStore:
         ]
         return elements, total_pages
 
+    def get_elements_range(
+        self, report_dir: str, start: int, end: int
+    ) -> List[Tuple[int, Dict[str, Any]]]:
+        """Return elements in the index range [start, end] (both inclusive).
+
+        Args:
+            report_dir: Path to the report directory.
+            start: Zero-based start element index.
+            end: Zero-based end element index (clamped to document length).
+
+        Returns:
+            A list of (element_index, element_dict) pairs.
+        """
+        content = self.get(report_dir)
+        end = min(end, len(content) - 1)
+        return [(i, content[i]) for i in range(max(0, start), end + 1)]
+
     def invalidate(self, report_dir: str) -> bool:
         """Remove a single entry from the cache.
 
