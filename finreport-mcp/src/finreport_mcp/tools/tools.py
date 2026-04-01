@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """MCP tool registration for finreport — financial report navigation.
 
 Agent-first philosophy: every tool returns human-readable text (markdown),

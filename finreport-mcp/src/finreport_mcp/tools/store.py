@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """DocumentStore — thread-safe LRU cache for MinerU content_list.json files."""
 
 import json
