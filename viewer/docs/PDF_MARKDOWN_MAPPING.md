@@ -285,13 +285,26 @@ useEffect(() => {
 
 Viewer 依赖 MinerU 解析输出的以下文件：
 
-| 文件 | 用途 |
-|------|------|
-| `content_list.json` | **核心**：包含所有元素的 `bbox`、`page_idx`、内容等信息 |
-| `*.pdf` | 原始 PDF 文件，用于左侧渲染 |
-| `images/` | 图片资源目录 |
-| `*.md` | Markdown 文本（作为备用显示） |
-| `raw/layout.json` | 布局信息（用于 JSON 标签页显示） |
+| 文件 | 必要性 | 用途 |
+|------|--------|------|
+| `content_list.json` | **✅ 必须** | 双向高亮核心数据：`bbox`、`page_idx`、内容 |
+| `*.pdf` | ✅ 必须 | 原始 PDF 文件，用于左侧渲染 |
+| `images/` | 可选 | 图片资源目录 |
+| `*.md` | 可选 | Markdown 文本（作为备用显示） |
+| `raw/layout.json` | ⚠️ 可选 | 仅用于 JSON Tab 调试展示 |
+
+### `content_list.json` vs `raw/layout.json` 对比
+
+| 特性 | `content_list.json` | `raw/layout.json` |
+|------|---------------------|-------------------|
+| **数据结构** | 扁平数组 `[{}, {}, ...]` | 嵌套结构 `{pdf_info: [{para_blocks: [...]}]}` |
+| **组织方式** | 按元素顺序排列 | 按**页面**组织，每页包含 block → lines → spans |
+| **页码信息** | `page_idx` 字段 | 隐含在数组索引（`pdf_info[0]` = 第1页） |
+| **坐标系** | 1000-based 归一化坐标 | 原始 PDF 像素坐标 |
+| **文件大小** | 较小（~几十KB） | 较大（~几百KB） |
+| **Viewer 用途** | **双向高亮 + Markdown 渲染** | 仅 JSON Tab 展示 |
+
+**结论**：`content_list.json` 是核心功能必须的数据；`raw/layout.json` 仅供开发调试查看 MinerU 原始解析结构，不影响双向高亮功能。
 
 ### content_list.json 示例
 
