@@ -8,15 +8,9 @@ from .banner import print_banner
 
 
 def main() -> None:
-    """Entry point for the finreport-mcp command-line interface.
-
-    finreport-mcp 命令行界面入口点。
-    """
+    """Entry point for the finreport-mcp command-line interface."""
     parser = argparse.ArgumentParser(
-        description=(
-            "finreport-mcp — MCP server for navigating MinerU-parsed financial reports\n"
-            "用于导航 MinerU 解析的财报的 MCP 服务器"
-        )
+        description="finreport-mcp — MCP server for navigating MinerU-parsed financial reports"
     )
 
     parser.add_argument(
@@ -24,7 +18,7 @@ def main() -> None:
         "-t",
         type=str,
         default="stdio",
-        help="Transport protocol (default: stdio; options: sse, streamable-http)\n协议类型（默认: stdio，可选: sse, streamable-http）",
+        help="Transport protocol (default: stdio; options: sse, streamable-http)",
     )
 
     parser.add_argument(
@@ -32,21 +26,21 @@ def main() -> None:
         "-p",
         type=int,
         default=8002,
-        help="Server port (default: 8002; only used for HTTP transports)\n服务器端口（默认: 8002，仅在 HTTP 协议下有效）",
+        help="Server port (default: 8002; only used for HTTP transports)",
     )
 
     parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
-        help="Bind address (default: 0.0.0.0; only used for HTTP transports)\n绑定地址（默认: 0.0.0.0，仅在 HTTP 协议下有效）",
+        help="Bind address (default: 0.0.0.0; only used for HTTP transports)",
     )
 
     parser.add_argument(
         "--cache-size",
         type=int,
         default=10,
-        help="Maximum number of reports to keep in the LRU cache (default: 10)\nLRU 缓存最多保留的报告数量（默认: 10）",
+        help="Maximum number of reports to keep in the LRU cache (default: 10)",
     )
 
     args = parser.parse_args()
@@ -54,7 +48,7 @@ def main() -> None:
     # Warn when host/port are specified but have no effect
     if args.transport == "stdio" and (args.host != "0.0.0.0" or args.port != 8002):
         print(
-            "警告: 在 STDIO 模式下，--host 和 --port 参数将被忽略。",
+            "Warning: --host and --port are ignored in stdio mode.",
             file=sys.stderr,
         )
 

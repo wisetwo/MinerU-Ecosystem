@@ -2,10 +2,6 @@
 
 Handles colspan and rowspan by expanding cells into a 2-D grid before
 rendering, which ensures column counts stay consistent across rows.
-
-纯 stdlib 实现的 HTML 表格转 GFM Markdown 转换器。
-通过将单元格展开为二维网格来处理 colspan 和 rowspan，
-确保各行列数一致。
 """
 
 from __future__ import annotations
@@ -159,8 +155,6 @@ def _pad_row(row: List[Optional[_Cell]], n_cols: int) -> List[Optional[_Cell]]:
 
 def html_table_to_markdown(html: str) -> str:
     """Convert an HTML ``<table>`` string to a GFM Markdown table.
-
-    将 HTML ``<table>`` 字符串转换为 GFM Markdown 表格。
 
     Features:
     - Expands colspan and rowspan into the 2-D grid

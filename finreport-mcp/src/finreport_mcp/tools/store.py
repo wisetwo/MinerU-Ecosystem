@@ -13,13 +13,10 @@ ContentList = List[Dict[str, Any]]
 class DocumentStore:
     """Thread-safe LRU cache for loaded content_list.json documents.
 
-    线程安全的 LRU 缓存，用于存储已加载的 content_list.json 文档。
-
     The cache uses a double-check pattern to avoid redundant I/O under
     concurrent access: file I/O is performed *outside* the lock, and
     the result is only inserted after re-acquiring the lock and verifying
     the key is still absent.
-    缓存采用双重检查模式：I/O 在锁外执行，仅在重新获取锁并确认键仍不存在后才插入结果。
     """
 
     def __init__(self, max_size: int = 10) -> None:
@@ -37,7 +34,6 @@ class DocumentStore:
         Using Path.resolve() ensures that two callers passing the same
         directory with different relative/absolute representations hit the
         same cache slot.
-        使用 Path.resolve() 规范化路径，避免同目录的不同写法重复缓存。
         """
         return str(Path(report_dir).resolve())
 
@@ -60,7 +56,6 @@ class DocumentStore:
         """Evict the least-recently-used entry when the cache is full.
 
         Must be called while holding *_lock*.
-        必须在持有 _lock 的情况下调用。
         """
         while len(self._cache) >= self._max_size:
             self._cache.popitem(last=False)
@@ -71,8 +66,6 @@ class DocumentStore:
 
     def get(self, report_dir: str) -> ContentList:
         """Return the content list for *report_dir*, loading it if necessary.
-
-        返回 *report_dir* 的内容列表，必要时从磁盘加载并缓存。
 
         Args:
             report_dir: Path to the directory containing content_list.json.
@@ -109,8 +102,6 @@ class DocumentStore:
     def get_element(self, report_dir: str, index: int) -> Dict[str, Any]:
         """Return a single element by its list index.
 
-        按列表索引返回单个元素。
-
         Args:
             report_dir: Path to the report directory.
             index: Zero-based element index.
@@ -133,8 +124,6 @@ class DocumentStore:
     ) -> Tuple[List[Tuple[int, Dict[str, Any]]], int]:
         """Return all elements on a given page together with the total page count.
 
-        返回指定页面的所有元素以及总页数。
-
         Args:
             report_dir: Path to the report directory.
             page_idx: Zero-based page index.
@@ -156,8 +145,6 @@ class DocumentStore:
     def invalidate(self, report_dir: str) -> bool:
         """Remove a single entry from the cache.
 
-        从缓存中移除单个条目。
-
         Returns:
             True if the entry was present and removed, False otherwise.
         """
@@ -169,17 +156,11 @@ class DocumentStore:
             return False
 
     def clear(self) -> None:
-        """Remove all entries from the cache.
-
-        清空整个缓存。
-        """
+        """Remove all entries from the cache."""
         with self._lock:
             self._cache.clear()
 
     def cached_dirs(self) -> List[str]:
-        """Return a snapshot of currently cached directory paths.
-
-        返回当前缓存的目录路径列表（快照）。
-        """
+        """Return a snapshot of currently cached directory paths."""
         with self._lock:
             return list(self._cache.keys())

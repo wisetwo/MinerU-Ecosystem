@@ -35,53 +35,36 @@ _HEADER = """\
 _INSTRUCTIONS = _HEADER + """
 You are connected to finreport-mcp, an MCP server for navigating and
 searching annual reports (HK / US listed companies) parsed by MinerU.
-你已连接到 finreport-mcp，这是一个用于导航和搜索由 MinerU 解析的
-上市公司年报（港股/美股）的 MCP 服务器。
 
-## Typical workflow / 典型工作流
+## Typical workflow
 
 1. Call **get_document_info** first to learn the report structure.
-   首先调用 get_document_info，了解报告结构（总页数、元素类型分布等）。
 
 2. Call **get_outline** to get a heading-based table of contents.
-   调用 get_outline 获取基于标题的目录结构。
 
 3. Use **get_page_content** to read a specific page in full.
-   使用 get_page_content 读取特定页面的全部元素。
 
 4. Use **search_text** to find pages/elements containing a keyword.
-   使用 search_text 搜索包含关键词的页面或元素。
 
 5. Call **get_element_detail** to get the full content of an element
    (especially useful for tables — returns both HTML and Markdown).
-   调用 get_element_detail 获取元素完整内容
-   （对表格尤其有用——同时返回 HTML 和 Markdown）。
 
 6. Call **get_table_image** to visually verify a table's Markdown accuracy.
-   调用 get_table_image 目视核验表格 Markdown 转换精度。
 
-## Citations / 引用
+## Citations
 
 Every element in a tool response includes ``element_index`` and
-``citation`` (e.g. ``[元素#42]``). Always include these in your answer
+``citation`` (e.g. ``[Element#42]``). Always include these in your answer
 so the user can trace the information back to the PDF source.
-每个工具响应中的元素都包含 ``element_index`` 和 ``citation``
-（如 ``[元素#42]``）。回答时请始终附上引用，方便用户追溯 PDF 原文。
 
-## Available tools / 可用工具
+## Available tools
 
 - get_document_info  — Document metadata and element type summary
-                       文档元数据及元素类型统计
 - get_outline        — Hierarchical heading outline
-                       层级标题大纲
 - get_page_content   — All elements on a given page
-                       指定页面的全部元素
 - search_text        — Keyword search across the document
-                       全文关键词搜索
 - get_element_detail — Full content of a single element (with table Markdown)
-                       单个元素的完整内容（含表格 Markdown）
 - get_table_image    — Table screenshot as base64 for visual verification
-                       表格截图（base64）用于目视核验
 """
 
 # ---------------------------------------------------------------------------
@@ -114,10 +97,7 @@ def get_store() -> DocumentStore:
 # ---------------------------------------------------------------------------
 
 def create_starlette_app(mcp_server, *, debug: bool = False) -> Starlette:
-    """Create a Starlette app for the SSE transport.
-
-    创建用于 SSE 传输的 Starlette 应用。
-    """
+    """Create a Starlette app for the SSE transport."""
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request) -> None:
@@ -153,8 +133,6 @@ def run_server(
 ) -> None:
     """Start the finreport-mcp server.
 
-    启动 finreport-mcp 服务器。
-
     Args:
         mode: Transport mode — 'stdio' (default), 'sse', or 'streamable-http'.
         port: TCP port for HTTP-based transports (default 8002).
@@ -182,7 +160,7 @@ def run_server(
         else:
             mcp.run(mode or "stdio")
     except Exception as e:
-        print(f"\n❌ 服务异常退出: {e}", flush=True)
+        print(f"\n❌ Server exited with error: {e}", flush=True)
         traceback.print_exc()
 
 

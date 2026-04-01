@@ -39,7 +39,6 @@ def print_banner(
     """Print the finreport-mcp startup banner to stderr.
 
     Always writes to stderr so it never corrupts the stdio MCP wire.
-    始终写入 stderr，确保不污染 stdio MCP 通道。
     """
     if transport in ("streamable-http", "sse"):
         display_host = host or "0.0.0.0"
