@@ -103,8 +103,8 @@ def _elem_one_liner(elem: Dict[str, Any]) -> str:
     elif etype == "image":
         captions = elem.get("img_caption", [])
         if captions:
-            return f"[图片: {'; '.join(captions)}]"
-        return "[图片]"
+            return f"[Image: {'; '.join(captions)}]"
+        return "[Image]"
     elif etype == "page_number":
         return ""  # skip
     return elem.get("text", "").strip()
@@ -150,7 +150,7 @@ def _render_elem(
     elif etype == "image":
         captions = elem.get("img_caption", [])
         if captions:
-            return anchor + f"[图片: {'; '.join(captions)}]"
+            return anchor + f"[Image: {'; '.join(captions)}]"
         return ""  # no caption → skip silently
 
     return anchor + elem.get("text", "").strip()
@@ -278,14 +278,14 @@ def register_tools(mcp: FastMCP, get_store_fn: Callable[[], DocumentStore]) -> N
                 type_counts[t] = type_counts.get(t, 0) + 1
 
             md_files = sorted(p.name for p in Path(abs_dir).glob("*.md"))
-            file_line = f"文件：{', '.join(md_files)}" if md_files else f"目录：{abs_dir}"
+            file_line = f"File: {', '.join(md_files)}" if md_files else f"Directory: {abs_dir}"
 
             # Type summary line
             type_summary = ", ".join(
                 f"{v} {k}" for k, v in sorted(type_counts.items(), key=lambda x: -x[1])
             )
             stats_line = (
-                f"共 {total_pages} 页，{len(content)} 个元素（{type_summary}）"
+                f"{total_pages} pages, {len(content)} elements ({type_summary})"
             )
 
             # Outline
@@ -296,9 +296,9 @@ def register_tools(mcp: FastMCP, get_store_fn: Callable[[], DocumentStore]) -> N
                 file_line,
                 stats_line,
                 "",
-                "## 目录",
+                "## Table of Contents",
                 "",
-                outline_text if outline_text else "（未找到章节标题）",
+                outline_text if outline_text else "(no headings found)",
             ])
 
             return {
