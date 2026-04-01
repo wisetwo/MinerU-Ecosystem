@@ -1,3 +1,12 @@
 .idea
 .env
 **/.DS_Store
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Claude Code local session config
+.claude/

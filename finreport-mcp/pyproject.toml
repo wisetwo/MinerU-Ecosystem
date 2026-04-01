@@ -1,0 +1,30 @@
+[project]
+name = "finreport-mcp"
+version = "0.1.0"
+description = "MCP Server for navigating and searching financial reports parsed by MinerU"
+authors = [
+    {name = "minerU", email = "OpenDataLab@pjlab.org.cn"}
+]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<4.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastmcp>=3.1.0",
+]
+
+[project.scripts]
+finreport-mcp = "finreport_mcp.cli:main"
+
+[build-system]
+requires = ["setuptools>=42.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
