@@ -59,8 +59,8 @@ _load_dotenv()
 # Path configuration
 # ---------------------------------------------------------------------------
 TESTS_DIR  = Path(__file__).parent
-# DOC_NAME   = "小米集团-1810-2024年年报-demo"
-DOC_NAME   = "拼多多-PDD-2024年年报-demo"
+DOC_NAME   = "小米集团-1810-2024年年报"
+# DOC_NAME   = "拼多多-PDD-2024年年报-demo"
 SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / DOC_NAME
 PDF_PATH   = TESTS_DIR / "pdf-demo" / f"{DOC_NAME}.pdf"
 SERVER_DIR = TESTS_DIR / "server" / DOC_NAME
