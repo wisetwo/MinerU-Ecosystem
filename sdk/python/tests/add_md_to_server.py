@@ -148,6 +148,71 @@ def chapter_to_filename(chapter: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HTML 表格美化
+# ---------------------------------------------------------------------------
+
+def prettify_html_tables(content: str) -> str:
+    """
+    把 Markdown 内容中所有压缩在单行的 HTML 表格展开为带缩进的多行格式。
+
+    输入示例：
+        <table><tr><td colspan="2">A</td><td>1</td></tr><tr><td>B</td></tr></table>
+
+    输出示例：
+        <table>
+          <tr>
+            <td colspan="2">A</td>
+            <td>1</td>
+          </tr>
+          <tr>
+            <td>B</td>
+          </tr>
+        </table>
+    """
+
+    def _prettify_one(m: re.Match) -> str:
+        raw = m.group(0)
+
+        # 在各标签前插入换行，再统一处理缩进
+        # 先把所有 > 后紧跟 < 的地方断开
+        spaced = re.sub(r'>\s*<', '>\n<', raw)
+
+        lines = spaced.split('\n')
+        result: list[str] = []
+        indent = 0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # 纯闭合标签（</table>、</tr>、</td> 等）先减缩进再输出
+            if re.match(r'^</(table|thead|tbody|tfoot|tr|th|td)>', line, re.IGNORECASE):
+                # 若上一行是纯空内容行（即上一个开标签后跟着闭标签），合并为单行
+                if result:
+                    prev = result[-1].strip()
+                    open_only = re.match(r'^<(td|th)(\s[^>]*)?>$', prev, re.IGNORECASE)
+                    if open_only:
+                        # 合并：把前一行的开标签与本闭标签拼在同一行
+                        result[-1] = result[-1] + line
+                        indent -= 1
+                        continue
+                indent -= 1
+
+            result.append('  ' * indent + line)
+
+            # 开标签（不是自闭合）且不含对应闭合标签 → 增加缩进
+            open_tag = re.match(r'^<(table|thead|tbody|tfoot|tr|th|td)(\s[^>]*)?>(?!.*</\1>)', line, re.IGNORECASE)
+            if open_tag:
+                indent += 1
+
+        return '\n' + '\n'.join(result) + '\n'
+
+    # 匹配整个 <table>…</table> 块（允许跨行）
+    return re.sub(r'<table>.*?</table>', _prettify_one, content, flags=re.DOTALL | re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
 # 图片目录复制
 # ---------------------------------------------------------------------------
 
@@ -195,6 +260,10 @@ def add_md_to_server(
     # 1. 读取 Markdown
     content = main_md.read_text(encoding="utf-8")
     logger.info(f"已读取文件，共 {len(content)} 字节")
+
+    # 美化所有 HTML 表格（展开为带缩进的多行格式）
+    content = prettify_html_tables(content)
+    logger.info("已完成 HTML 表格美化")
 
     # 2. 解析目录
     chapters = parse_toc_from_html_table(content)
