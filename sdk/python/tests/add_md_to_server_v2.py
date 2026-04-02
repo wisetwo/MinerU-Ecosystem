@@ -690,12 +690,20 @@ def split_items_by_chapters(
     """
     Group content_list items by TOC chapter.
 
-    Matching strategy (tried in priority order):
-    1. A single text_level=1 item whose text exactly matches the chapter title
-       (ignoring leading/trailing whitespace and case).
-    2. Several consecutive text_level=1 items on the same page whose concatenated
-       text matches the chapter title (handles titles split across lines, e.g.
-       "FIVE-YEAR " + "FINANCIAL SUMMARY ").
+    Matching strategy (tried in priority order for each TOC chapter):
+    1. **Exact text match** — A single text_level=1 item whose text exactly
+       matches the chapter title (ignoring whitespace and case).
+    2. **Concatenation match** — Several consecutive text_level=1 items on the
+       same page whose concatenated text matches the chapter title (handles
+       titles split across lines, e.g. "FIVE-YEAR " + "FINANCIAL SUMMARY ").
+    3. **Fuzzy text match** — Strip punctuation (commas, apostrophes, periods …)
+       before comparing.  This handles inconsistencies like "SOCIAL AND" vs
+       "SOCIAL, AND" (Oxford comma) between the TOC and body headings.
+    4. **Page-number fallback** — Use the page number from the TOC entry to
+       locate the nearest text_level=1 heading on that page (or the first
+       heading on a subsequent page).  This handles cases where the chapter
+       title in the body differs significantly (e.g. a section cover page that
+       was not extracted as a heading).
 
     The returned dict always contains these keys:
     - "pre_toc"  : items before the TOC page (cover, shareholder notices, etc.)
@@ -704,15 +712,20 @@ def split_items_by_chapters(
     """
 
     def _norm(s: str) -> str:
+        """Normalise whitespace + case."""
+        return re.sub(r"\s+", " ", s.strip()).lower()
+
+    def _norm_fuzzy(s: str) -> str:
+        """Normalise by also stripping punctuation (for fuzzy comparison)."""
+        s = re.sub(r"[^\w\s]", "", s)          # remove all non-word, non-space chars
         return re.sub(r"\s+", " ", s.strip()).lower()
 
     toc_titles = [entry["title"] for entry in toc]
+    toc_pages  = {entry["title"]: entry["page"] for entry in toc}   # title → PDF page number
     toc_norm   = {_norm(t): t for t in toc_titles}
+    toc_fuzzy  = {_norm_fuzzy(t): t for t in toc_titles}            # for fallback 3
 
-    # Identify TOC page_idx values using the same two-strategy logic as
-    # find_toc_pages(): type=text match for HK/Chinese reports; type=header
-    # match only when the page also contains a table, keeping only the first
-    # contiguous run to avoid mis-classifying financial-statement table pages.
+    # ── Identify TOC page_idx values ────────────────────────────────────
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
     pages_with_table: set[int] = {
         item["page_idx"] for item in all_items if item.get("type") == "table"
@@ -740,7 +753,12 @@ def split_items_by_chapters(
                 break
         toc_page_idxs = set(_toc_run)
 
-    # Pre-process: collect all text_level=1 item positions (excluding TOC pages)
+    # ── Determine page_idx offset ───────────────────────────────────────
+    # PDF page numbers (printed) may differ from 0-based page_idx.
+    # Detect the offset by looking at page_number items.
+    page_offset = _detect_page_offset(all_items)
+
+    # ── Pre-process: heading positions ──────────────────────────────────
     heading_items: list[tuple[int, dict]] = [
         (idx, item)
         for idx, item in enumerate(all_items)
@@ -749,7 +767,7 @@ def split_items_by_chapters(
         and item.get("page_idx") not in toc_page_idxs
     ]
 
-    # Group by page and attempt concatenation matching
+    # ── Pass 1 & 2: exact + concatenation match ────────────────────────
     chapter_starts: list[tuple[int, str]] = []
     already_matched: set[str] = set()
 
@@ -773,6 +791,84 @@ def split_items_by_chapters(
                         chapter_starts.append((group[start][0], canonical))
                         already_matched.add(canonical)
                     break
+
+    # ── Pass 3: fuzzy text match (strip punctuation) ───────────────────
+    missed_after_exact = [t for t in toc_titles if t not in already_matched]
+    if missed_after_exact:
+        for pg in sorted(page_groups):
+            group = page_groups[pg]
+            n = len(group)
+            for start in range(n):
+                accumulated = ""
+                for end in range(start, n):
+                    text = (group[end][1].get("text") or "").strip()
+                    accumulated = (accumulated + " " + text).strip() if accumulated else text
+                    fuzzy_acc = _norm_fuzzy(accumulated)
+                    if fuzzy_acc in toc_fuzzy:
+                        canonical = toc_fuzzy[fuzzy_acc]
+                        if canonical not in already_matched:
+                            logger.info(
+                                f"  [fuzzy match] TOC '{canonical}' ← "
+                                f"heading '{accumulated.strip()}' (page_idx={pg})"
+                            )
+                            chapter_starts.append((group[start][0], canonical))
+                            already_matched.add(canonical)
+                        break
+
+    # ── Pass 4: page-number fallback ───────────────────────────────────
+    missed_after_fuzzy = [t for t in toc_titles if t not in already_matched]
+    if missed_after_fuzzy:
+        # Build a sorted list of (item_array_idx, page_idx) for all headings
+        heading_by_page: list[tuple[int, int]] = [
+            (idx, item.get("page_idx", -1)) for idx, item in heading_items
+        ]
+
+        for title in missed_after_fuzzy:
+            pdf_page = toc_pages[title]
+            target_page_idx = pdf_page + page_offset  # convert PDF page → page_idx
+
+            # Find the first heading on target_page_idx or immediately after it.
+            # Also allow looking 1 page *before* to handle minor offset issues.
+            best_idx: int | None = None
+            best_distance = float("inf")
+            for h_idx, h_page in heading_by_page:
+                dist = h_page - target_page_idx
+                # Accept headings on the target page or up to 2 pages after
+                # (but not too far ahead — that would be a different chapter).
+                if -1 <= dist <= 2 and abs(dist) < best_distance:
+                    best_distance = abs(dist)
+                    best_idx = h_idx
+                    # Prefer exact page match
+                    if dist == 0:
+                        break
+
+            if best_idx is not None:
+                heading_text = (all_items[best_idx].get("text") or "").strip()
+                heading_page = all_items[best_idx].get("page_idx")
+                logger.info(
+                    f"  [page fallback] TOC '{title}' (p.{pdf_page}) → "
+                    f"heading '{heading_text}' (page_idx={heading_page})"
+                )
+                chapter_starts.append((best_idx, title))
+                already_matched.add(title)
+            else:
+                # Last resort: use page_idx directly even if no heading exists.
+                # Find the first item on target_page_idx.
+                first_on_page: int | None = None
+                for arr_idx, item in enumerate(all_items):
+                    if item.get("page_idx", -1) >= target_page_idx:
+                        # Skip TOC pages, headers, page numbers
+                        if (item.get("page_idx") not in toc_page_idxs
+                                and item.get("type") not in ("header", "page_number")):
+                            first_on_page = arr_idx
+                            break
+                if first_on_page is not None:
+                    logger.info(
+                        f"  [page fallback - no heading] TOC '{title}' (p.{pdf_page}) → "
+                        f"first content item at page_idx={all_items[first_on_page].get('page_idx')}"
+                    )
+                    chapter_starts.append((first_on_page, title))
+                    already_matched.add(title)
 
     chapter_starts.sort(key=lambda x: x[0])
 
@@ -806,6 +902,37 @@ def split_items_by_chapters(
             logger.warning(f"  - {t!r}")
 
     return result
+
+
+def _detect_page_offset(all_items: list[dict]) -> int:
+    """
+    Detect the offset between PDF printed page numbers and 0-based page_idx.
+
+    Examines page_number items to infer: page_idx = pdf_page + offset.
+    For example, if page_idx=3 has page_number text "4", offset = -1.
+    Returns 0 if detection fails.
+    """
+    offsets: list[int] = []
+    for item in all_items:
+        if item.get("type") != "page_number":
+            continue
+        text = (item.get("text") or "").strip()
+        page_idx = item.get("page_idx")
+        if page_idx is None:
+            continue
+        # Try to parse the page number text
+        m = re.match(r"^(\d+)\s*$", text)
+        if m:
+            pdf_page = int(m.group(1))
+            offsets.append(page_idx - pdf_page)
+    if not offsets:
+        return 0
+    # Use the most common offset (majority vote)
+    from collections import Counter
+    counter = Counter(offsets)
+    most_common = counter.most_common(1)[0][0]
+    logger.debug(f"Detected page_idx offset: {most_common} (from {len(offsets)} page_number items)")
+    return most_common
 
 
 # ===========================================================================
