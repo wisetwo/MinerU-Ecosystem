@@ -59,7 +59,8 @@ _load_dotenv()
 # Path configuration
 # ---------------------------------------------------------------------------
 TESTS_DIR  = Path(__file__).parent
-DOC_NAME   = "小米集团-1810-2024年年报-demo"
+# DOC_NAME   = "小米集团-1810-2024年年报-demo"
+DOC_NAME   = "拼多多-PDD-2024年年报-demo"
 SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / DOC_NAME
 PDF_PATH   = TESTS_DIR / "pdf-demo" / f"{DOC_NAME}.pdf"
 SERVER_DIR = TESTS_DIR / "server" / DOC_NAME
@@ -92,17 +93,56 @@ def load_content_list(source_dir: Path) -> list[dict]:
 def find_toc_pages(items: list[dict]) -> list[int]:
     """
     Locate the page_idx list of TOC pages within content_list.
-    Matches text_level=1 headings whose text contains CONTENTS / 目录 keywords.
+
+    Two detection strategies are applied:
+
+    1. **type=text** with TOC keyword — classic HK / Chinese annual report style
+       (e.g. a level-1 heading whose text is "CONTENTS" or "目录").
+
+    2. **type=header** with TOC keyword AND the same page also contains a
+       ``type=table`` item — US-listed report (20-F) style where "Table of
+       Contents" is a running page-header printed on *every* page, but the
+       actual TOC page is distinguished by having its chapter list rendered as
+       a table by MinerU.  Only the *first contiguous run* of such pages is
+       kept; later table pages (e.g. financial statement tables) are excluded.
     """
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
-    pages: list[int] = []
+
+    # Collect pages that contain at least one table item (needed for strategy 2)
+    pages_with_table: set[int] = {
+        item["page_idx"] for item in items if item.get("type") == "table"
+    }
+
+    strategy1_pages: list[int] = []
+    strategy2_candidates: list[int] = []
+
     for item in items:
-        if item.get("type") != "text":
-            continue
+        item_type = item.get("type")
         text = (item.get("text") or "").strip()
-        if toc_kw.search(text):
-            pages.append(item["page_idx"])
-    return sorted(set(pages))
+        if not toc_kw.search(text):
+            continue
+        if item_type == "text":
+            # Strategy 1: explicit TOC heading rendered as a text item
+            strategy1_pages.append(item["page_idx"])
+        elif item_type == "header" and item["page_idx"] in pages_with_table:
+            # Strategy 2 candidate: running header on a page that also has a table
+            strategy2_candidates.append(item["page_idx"])
+
+    if strategy1_pages:
+        return sorted(set(strategy1_pages))
+
+    # Strategy 2: keep only the first contiguous run of candidate pages so that
+    # later financial-statement table pages are not mis-classified as TOC pages.
+    candidates = sorted(set(strategy2_candidates))
+    if not candidates:
+        return []
+    toc_run: list[int] = [candidates[0]]
+    for pg in candidates[1:]:
+        if pg == toc_run[-1] + 1:
+            toc_run.append(pg)
+        else:
+            break  # stop at first gap
+    return toc_run
 
 
 def items_on_pages(items: list[dict], page_idxs: list[int]) -> list[dict]:
@@ -455,13 +495,8 @@ def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
             return f"# {text}\n"
         return f"{text}\n"
 
-    if t == "header":
-        # Page headers are kept as blockquotes to distinguish them from body text
-        text = (item.get("text") or "").strip()
-        return f"> {text}\n" if text.strip("#").strip() else ""
-
-    if t == "page_number":
-        # Page numbers are skipped
+    if t in ("header", "page_number"):
+        # Running page headers/footers and page numbers add no content value
         return ""
 
     if t == "page_footnote":
@@ -567,12 +602,36 @@ def split_items_by_chapters(
     toc_titles = [entry["title"] for entry in toc]
     toc_norm   = {_norm(t): t for t in toc_titles}
 
-    # Identify TOC page_idx values (pages containing CONTENTS / 目录 keywords)
+    # Identify TOC page_idx values using the same two-strategy logic as
+    # find_toc_pages(): type=text match for HK/Chinese reports; type=header
+    # match only when the page also contains a table, keeping only the first
+    # contiguous run to avoid mis-classifying financial-statement table pages.
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
-    toc_page_idxs: set[int] = set()
+    pages_with_table: set[int] = {
+        item["page_idx"] for item in all_items if item.get("type") == "table"
+    }
+    _s1_pages: list[int] = []
+    _s2_candidates: list[int] = []
     for item in all_items:
-        if item.get("type") == "text" and toc_kw.search((item.get("text") or "").strip()):
-            toc_page_idxs.add(item["page_idx"])
+        item_type = item.get("type")
+        text = (item.get("text") or "").strip()
+        if not toc_kw.search(text):
+            continue
+        if item_type == "text":
+            _s1_pages.append(item["page_idx"])
+        elif item_type == "header" and item["page_idx"] in pages_with_table:
+            _s2_candidates.append(item["page_idx"])
+    if _s1_pages:
+        toc_page_idxs: set[int] = set(_s1_pages)
+    else:
+        _s2_sorted = sorted(set(_s2_candidates))
+        _toc_run: list[int] = [_s2_sorted[0]] if _s2_sorted else []
+        for _pg in _s2_sorted[1:]:
+            if _pg == _toc_run[-1] + 1:
+                _toc_run.append(_pg)
+            else:
+                break
+        toc_page_idxs = set(_toc_run)
 
     # Pre-process: collect all text_level=1 item positions (excluding TOC pages)
     heading_items: list[tuple[int, dict]] = [
