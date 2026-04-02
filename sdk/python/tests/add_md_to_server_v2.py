@@ -495,9 +495,13 @@ def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
             return f"# {text}\n"
         return f"{text}\n"
 
-    if t in ("header", "page_number"):
+    if t in ("header"):
         # Running page headers/footers and page numbers add no content value
         return ""
+
+    if t == "page_number":
+        text = (item.get("text") or "").strip()
+        return f"\n<!--Page Number: {text}-->\n"
 
     if t == "page_footnote":
         text = (item.get("text") or "").strip()
