@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-# 需要 Python 3.11+（使用了 X | Y 联合类型注解语法）
+# Requires Python 3.11+ (uses X | Y union type annotation syntax)
 # -*- coding: utf-8 -*-
 """
 add_md_to_server_v2.py
 ======================
-基于 content_list.json（而非整体 Markdown）把年报拆分为按章节独立的 Markdown 文件。
+Splits an annual report into per-chapter Markdown files using content_list.json
+(rather than splitting the overall Markdown file).
 
-与 v1 的核心区别：
-1. 数据源：使用 content_list.json，逐条 item 重建 Markdown，而非正则切割整体 .md
-2. 目录识别：先从 content_list 定位"目录页"（含 CONTENTS/目录 关键词的页面）；
-   如果 content_list 里的文本项能直接解析出章节列表就直接用；
-   否则用 pdftoppm 把该页渲染成 JPEG，再调用视觉大模型识别。
-3. 章节切割：以 content_list 中的 text_level=1 标题为分界，按 page_idx 聚合 item 后拼接。
+Key differences from v1:
+1. Data source: rebuilds Markdown item-by-item from content_list.json instead of
+   regex-splitting the whole .md file.
+2. TOC detection: first locates "TOC pages" in content_list (pages whose text
+   contains CONTENTS / 目录 keywords); if the text items can be parsed directly
+   into a chapter list that path is taken; otherwise pdftoppm renders the page as
+   a JPEG which is then sent to a vision model for recognition.
+3. Chapter splitting: uses text_level=1 headings in content_list as boundaries,
+   aggregates items by page_idx, then concatenates.
 
-用法：
+Usage:
     python3 add_md_to_server_v2.py
 
-环境变量（视觉模型调用，三选一即可）：
-    OPENAI_API_KEY        + OPENAI_BASE_URL（可选，默认 https://api.openai.com/v1）
-    ANTHROPIC_AUTH_TOKEN  + ANTHROPIC_BASE_URL + ANTHROPIC_CUSTOM_HEADERS（可选）
+Environment variables (vision model — set any one):
+    OPENAI_API_KEY        + OPENAI_BASE_URL (optional, default https://api.openai.com/v1)
+    ANTHROPIC_AUTH_TOKEN  + ANTHROPIC_BASE_URL + ANTHROPIC_CUSTOM_HEADERS (optional)
     OPENROUTER_API_KEY
 
-    VISION_MODEL          指定视觉模型名称，默认 gpt-4o
+    VISION_MODEL          vision model name, default gpt-4o
 """
 
 import base64
@@ -35,7 +39,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-# 自动加载同级或上级目录的 .env（优先级：当前文件的父目录逐级向上查找）
+# Auto-load .env from the same directory or any ancestor (searches upward up to 4 levels)
 def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv
@@ -47,12 +51,12 @@ def _load_dotenv() -> None:
                 break
             cur = cur.parent
     except ImportError:
-        pass  # python-dotenv 未安装时忽略
+        pass  # python-dotenv not installed — silently skip
 
 _load_dotenv()
 
 # ---------------------------------------------------------------------------
-# 路径配置
+# Path configuration
 # ---------------------------------------------------------------------------
 TESTS_DIR  = Path(__file__).parent
 DOC_NAME   = "小米集团-1810-2024年年报-demo"
@@ -60,11 +64,11 @@ SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / DOC_NAME
 PDF_PATH   = TESTS_DIR / "pdf-demo" / f"{DOC_NAME}.pdf"
 SERVER_DIR = TESTS_DIR / "server" / DOC_NAME
 
-# 视觉模型缓存文件（避免重复 API 调用）
+# Vision model cache file (avoids redundant API calls)
 LLM_CACHE_FILE = SOURCE_DIR / f"{DOC_NAME}__toc_by_vision.json"
 
 # ---------------------------------------------------------------------------
-# 日志
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -75,20 +79,20 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# 1. content_list.json 工具
+# 1. content_list.json utilities
 # ===========================================================================
 
 def load_content_list(source_dir: Path) -> list[dict]:
     path = source_dir / "content_list.json"
     if not path.exists():
-        raise FileNotFoundError(f"未找到 content_list.json: {path}")
+        raise FileNotFoundError(f"content_list.json not found: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def find_toc_pages(items: list[dict]) -> list[int]:
     """
-    从 content_list 中定位"目录页"的 page_idx 列表。
-    匹配 text 中含 CONTENTS / 目录 等关键词的 text_level=1 标题。
+    Locate the page_idx list of TOC pages within content_list.
+    Matches text_level=1 headings whose text contains CONTENTS / 目录 keywords.
     """
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
     pages: list[int] = []
@@ -102,16 +106,16 @@ def find_toc_pages(items: list[dict]) -> list[int]:
 
 
 def items_on_pages(items: list[dict], page_idxs: list[int]) -> list[dict]:
-    """返回指定页码范围内的所有 item（page_idx 0-based）。"""
+    """Return all items whose page_idx falls within the given set (0-based)."""
     page_set = set(page_idxs)
     return [i for i in items if i.get("page_idx") in page_set]
 
 
 # ===========================================================================
-# 2. 从 content_list 直接解析目录（快速路径）
+# 2. Parse TOC directly from content_list (fast path)
 # ===========================================================================
 
-# 目录行格式："章节标题  123" 或 "章节标题 123 "
+# TOC line format: "Chapter Title  123" or "Chapter Title 123 "
 _TOC_LINE_RE = re.compile(
     r'^(?P<title>.+?)\s+(?P<page>\d+)\s*$'
 )
@@ -119,17 +123,19 @@ _TOC_LINE_RE = re.compile(
 
 def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
     """
-    尝试从目录页的 text items 直接提取章节信息。
-    每个 item.text 通常形如 "CHAPTER TITLE  12 "。
+    Try to extract chapter information directly from TOC-page text items.
+    Each item.text typically looks like "CHAPTER TITLE  12 ".
 
-    返回 [{"title": "...", "page": int}, ...] 列表。
-    如果解析结果为空、或有效条目数不足非空文本行的 50%（说明页码被渲染为图片），
-    则返回空列表以触发视觉模型兜底。
+    Returns [{"title": "...", "page": int}, ...].
+    Returns an empty list (triggering the vision-model fallback) when:
+    - no entries were parsed, or
+    - valid matches cover less than 50% of non-empty text lines
+      (indicating that page numbers were rendered as images).
     """
     results: list[dict] = []
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
 
-    non_toc_header_texts: list[str] = []   # 用于统计有效文本行数
+    non_toc_header_texts: list[str] = []  # used to count total valid text lines
 
     for item in toc_items:
         if item.get("type") != "text":
@@ -137,7 +143,7 @@ def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
         text = (item.get("text") or "").strip()
         if not text:
             continue
-        # 跳过目录标题行本身
+        # Skip the TOC heading line itself
         if toc_kw.search(text):
             continue
         non_toc_header_texts.append(text)
@@ -148,12 +154,12 @@ def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
                 "page":  int(m.group("page")),
             })
 
-    # 品质检查：若匹配率低于 50%，说明页码大量渲染为图片，触发视觉模型
+    # Quality check: if match rate < 50%, many page numbers were rendered as images
     total = len(non_toc_header_texts)
     if total > 0 and len(results) < total * 0.5:
         logger.info(
-            f"快速路径仅匹配 {len(results)}/{total} 条目录项"
-            "（部分页码可能渲染为图片），将使用视觉模型"
+            f"Fast path matched only {len(results)}/{total} TOC entries"
+            " (some page numbers may be rendered as images) — falling back to vision model"
         )
         return []
 
@@ -161,20 +167,21 @@ def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
 
 
 # ===========================================================================
-# 3. 视觉大模型识别（慢速路径）
+# 3. Vision model recognition (slow path)
 # ===========================================================================
 
 def render_pdf_pages_to_jpeg(
     pdf_path: Path,
-    page_idxs: list[int],   # 0-based
+    page_idxs: list[int],          # 0-based
     dpi: int = 150,
-    keep_dir: Path | None = None,   # 非 None 时保留截图到指定目录
+    keep_dir: Path | None = None,  # if not None, screenshots are saved here
 ) -> list[Path]:
     """
-    用 pdftoppm 把 PDF 的指定页（0-based）渲染为 JPEG，
-    返回 JPEG 文件路径列表。
-    keep_dir 非 None 时把截图保存到该目录（调用方负责管理），
-    否则保存到临时目录（调用方负责删除）。
+    Render specified PDF pages (0-based) to JPEG using pdftoppm.
+    Returns a list of JPEG file paths.
+
+    If keep_dir is provided the images are written there (caller manages lifetime);
+    otherwise a temporary directory is used (caller is responsible for cleanup).
     """
     out_dir = keep_dir if keep_dir is not None else Path(tempfile.mkdtemp(prefix="toc_render_"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -205,26 +212,26 @@ def render_pdf_pages_to_jpeg(
 
 def _build_vision_client():
     """
-    根据环境变量构造 OpenAI-compatible 客户端。
-    优先级：OPENAI_API_KEY > ANTHROPIC_AUTH_TOKEN > OPENROUTER_API_KEY
-    返回 (client, model_name)。
+    Build an OpenAI-compatible client from environment variables.
+    Priority: OPENAI_API_KEY > ANTHROPIC_AUTH_TOKEN > OPENROUTER_API_KEY
+    Returns (client, model_name).
     """
     try:
         from openai import OpenAI
     except ImportError:
-        raise RuntimeError("请先安装 openai 包：pip install openai")
+        raise RuntimeError("openai package is required: pip install openai")
 
     model = os.environ.get("VISION_MODEL", "gpt-4o")
 
     if key := os.environ.get("OPENAI_API_KEY"):
         base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         client = OpenAI(api_key=key, base_url=base_url)
-        logger.debug(f"使用 OpenAI 兼容接口: {base_url}, 模型: {model}")
+        logger.debug(f"Using OpenAI-compatible endpoint: {base_url}, model: {model}")
         return client, model
 
     if key := os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-        # 解析自定义 headers（格式: "Key: Value\nKey2: Value2"）
+        # Parse custom headers (format: "Key: Value\nKey2: Value2")
         extra_headers: dict[str, str] = {}
         for line in os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "").split("\n"):
             if ": " in line:
@@ -238,7 +245,7 @@ def _build_vision_client():
         model = os.environ.get("VISION_MODEL") or os.environ.get(
             "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-5"
         )
-        logger.debug(f"使用 Anthropic 接口: {base_url}, 模型: {model}")
+        logger.debug(f"Using Anthropic endpoint: {base_url}, model: {model}")
         return client, model
 
     if key := os.environ.get("OPENROUTER_API_KEY"):
@@ -247,11 +254,11 @@ def _build_vision_client():
             base_url="https://openrouter.ai/api/v1",
         )
         model = os.environ.get("VISION_MODEL", "openai/gpt-4o")
-        logger.debug(f"使用 OpenRouter, 模型: {model}")
+        logger.debug(f"Using OpenRouter, model: {model}")
         return client, model
 
     raise RuntimeError(
-        "未找到 API key。请设置 OPENAI_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENROUTER_API_KEY"
+        "No API key found. Set OPENAI_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENROUTER_API_KEY"
     )
 
 
@@ -271,8 +278,8 @@ Format: [{"title": "CHAPTER TITLE", "page": 12}, ...]
 
 def call_vision_model_for_toc(jpeg_paths: list[Path]) -> list[dict]:
     """
-    把一张或多张 TOC 截图发给视觉模型，返回章节列表。
-    结构: [{"title": "...", "page": int}, ...]
+    Send one or more TOC screenshots to the vision model and return a chapter list.
+    Structure: [{"title": "...", "page": int}, ...]
     """
     client, model = _build_vision_client()
 
@@ -285,7 +292,7 @@ def call_vision_model_for_toc(jpeg_paths: list[Path]) -> list[dict]:
         })
     content.append({"type": "text", "text": _VISION_PROMPT})
 
-    logger.info(f"调用视觉模型 [{model}] 识别 {len(jpeg_paths)} 张目录截图…")
+    logger.info(f"Calling vision model [{model}] on {len(jpeg_paths)} TOC screenshot(s)…")
     response = client.chat.completions.create(
         model=model,
         max_tokens=2048,
@@ -294,17 +301,17 @@ def call_vision_model_for_toc(jpeg_paths: list[Path]) -> list[dict]:
     )
 
     raw = response.choices[0].message.content.strip()
-    logger.debug(f"视觉模型原始返回: {raw[:300]}")
+    logger.debug(f"Vision model raw response: {raw[:300]}")
 
-    # 去掉可能包裹的 markdown 代码块
+    # Strip possible markdown code fences
     raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"```$", "", raw, flags=re.MULTILINE)
 
     parsed = json.loads(raw.strip())
     if not isinstance(parsed, list):
-        raise ValueError(f"视觉模型返回格式不是列表: {raw[:200]}")
+        raise ValueError(f"Vision model response is not a list: {raw[:200]}")
 
-    # 规范化字段
+    # Normalise fields
     results: list[dict] = []
     for item in parsed:
         title = str(item.get("title", "")).strip()
@@ -312,12 +319,12 @@ def call_vision_model_for_toc(jpeg_paths: list[Path]) -> list[dict]:
         if title and page is not None:
             results.append({"title": title, "page": int(page)})
 
-    logger.info(f"视觉模型识别出 {len(results)} 个章节")
+    logger.info(f"Vision model recognised {len(results)} chapter(s)")
     return results
 
 
 # ===========================================================================
-# 4. 目录获取（带缓存）
+# 4. TOC retrieval (with cache)
 # ===========================================================================
 
 def get_toc(
@@ -328,51 +335,53 @@ def get_toc(
     keep_temp: bool = False,
 ) -> tuple[list[dict], bool]:
     """
-    获取目录章节列表。
+    Retrieve the chapter list from the TOC.
 
-    返回 (chapters, used_vision)：
+    Returns (chapters, used_vision):
     - chapters    : [{"title": str, "page": int}, ...]
-    - used_vision : True 表示结果来自视觉模型（或其缓存），False 表示来自文本快速路径
+    - used_vision : True if the result came from the vision model (or its cache),
+                    False if it came from the text fast path.
     """
     cache_file = LLM_CACHE_FILE
 
-    # --- 缓存命中（来自上次视觉模型调用）---
+    # Cache hit (from a previous vision model call)
     if cache_file.exists() and not force_vision:
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
         if isinstance(cached, list) and cached:
-            logger.info(f"使用 TOC 缓存: {cache_file.name}（{len(cached)} 个章节）")
-            return cached, True   # 缓存由视觉模型生成，标记为 used_vision
+            logger.info(f"Using TOC cache: {cache_file.name} ({len(cached)} chapters)")
+            return cached, True  # cache originates from vision model
 
-    # --- 定位目录页 ---
+    # Locate TOC pages
     toc_pages = find_toc_pages(items)
     if not toc_pages:
-        raise ValueError("在 content_list 中未找到目录页（含 CONTENTS/目录 关键词）")
-    logger.info(f"检测到目录页 page_idx: {toc_pages}")
+        raise ValueError("No TOC page found in content_list (expected CONTENTS / 目录 keyword)")
+    logger.info(f"Detected TOC page_idx(s): {toc_pages}")
 
-    # --- 快速路径：直接从文本解析 ---
+    # Fast path: parse chapters directly from text items
     if not force_vision:
         toc_items = items_on_pages(items, toc_pages)
         chapters = parse_toc_from_text_items(toc_items)
         if chapters:
-            logger.info(f"从 content_list 文本直接解析出 {len(chapters)} 个章节（快速路径）")
+            logger.info(f"Parsed {len(chapters)} chapters from content_list text (fast path)")
             _save_toc_cache(cache_file, chapters)
-            return chapters, False   # 文本解析，标记为非视觉
-        logger.info("content_list 文本解析章节数为 0，改用视觉模型")
+            return chapters, False  # text-parsed, not vision
+        logger.info("Text parsing yielded 0 chapters — switching to vision model")
 
-    # --- 慢速路径：视觉模型 ---
+    # Slow path: vision model
     if not pdf_path.exists():
         raise FileNotFoundError(
-            f"需要原始 PDF 来渲染目录截图，但找不到: {pdf_path}\n"
-            "请将 PDF 放到 tests/pdf-demo/ 目录，或设置 force_vision=False 并确保 content_list 可解析。"
+            f"Original PDF needed to render TOC screenshots but not found: {pdf_path}\n"
+            "Place the PDF under tests/pdf-demo/, or ensure content_list is parseable "
+            "and set force_vision=False."
         )
 
     keep_dir = (source_dir / "debug_toc_render") if keep_temp else None
     if keep_dir:
         keep_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"--keep-temp 已启用，截图将保存到: {keep_dir}")
+        logger.info(f"--keep-temp enabled; screenshots will be saved to: {keep_dir}")
 
     jpeg_paths = render_pdf_pages_to_jpeg(pdf_path, toc_pages, dpi=150, keep_dir=keep_dir)
-    logger.info(f"已渲染 {len(jpeg_paths)} 张截图: {[p.name for p in jpeg_paths]}")
+    logger.info(f"Rendered {len(jpeg_paths)} screenshot(s): {[p.name for p in jpeg_paths]}")
 
     try:
         chapters = call_vision_model_for_toc(jpeg_paths)
@@ -387,25 +396,25 @@ def get_toc(
                     pass
 
     if not chapters:
-        raise ValueError("视觉模型未能识别出任何章节，请检查 TOC 页截图或模型配置")
+        raise ValueError("Vision model returned no chapters — check TOC screenshots or model config")
 
     _save_toc_cache(cache_file, chapters)
-    return chapters, True   # 视觉模型路径
+    return chapters, True  # vision model path
 
 
 def _save_toc_cache(cache_file: Path, chapters: list[dict]) -> None:
     cache_file.write_text(
         json.dumps(chapters, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    logger.info(f"TOC 已缓存到 {cache_file.name}")
+    logger.info(f"TOC cached to {cache_file.name}")
 
 
 # ===========================================================================
-# 5. content_list → Markdown 重建
+# 5. content_list → Markdown reconstruction
 # ===========================================================================
 
 def prettify_html_tables(content: str) -> str:
-    """展开压缩在单行的 HTML 表格为带缩进的多行格式（与 v1 保持一致）。"""
+    """Expand single-line HTML tables into indented multi-line format (consistent with v1)."""
 
     def _prettify_one(m: re.Match) -> str:
         raw = m.group(0)
@@ -436,7 +445,7 @@ def prettify_html_tables(content: str) -> str:
 
 
 def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
-    """把单个 content_list item 转为 Markdown 文本。"""
+    """Convert a single content_list item to a Markdown string."""
     t = item.get("type", "")
 
     if t == "text":
@@ -447,12 +456,12 @@ def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
         return f"{text}\n"
 
     if t == "header":
-        # header 通常是页眉，原样保留为引用块以便区分
+        # Page headers are kept as blockquotes to distinguish them from body text
         text = (item.get("text") or "").strip()
         return f"> {text}\n" if text.strip("#").strip() else ""
 
     if t == "page_number":
-        # 页码跳过
+        # Page numbers are skipped
         return ""
 
     if t == "page_footnote":
@@ -488,13 +497,13 @@ def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
                 lines.append(f"- {li}")
         return "\n".join(lines) + "\n" if lines else ""
 
-    # 未知类型降级为文本
+    # Unknown type — degrade to plain text
     text = item.get("text", "")
     return f"{text}\n" if text else ""
 
 
 def build_markdown_from_items(items: list[dict]) -> str:
-    """把一组 content_list items 拼接为完整 Markdown 字符串。"""
+    """Concatenate a list of content_list items into a complete Markdown string."""
     parts: list[str] = []
     for item in items:
         md = item_to_markdown(item)
@@ -504,21 +513,21 @@ def build_markdown_from_items(items: list[dict]) -> str:
 
 
 # ===========================================================================
-# 6. 按章节切割
+# 6. Chapter splitting
 # ===========================================================================
 
 def chapter_to_filename(title: str) -> str:
-    """章节标题 → 合法文件名。"""
+    """Convert a chapter title to a valid filename."""
     clean = re.sub(r"[^\w\s\-.]", "", title)
     clean = re.sub(r"\s+", "_", clean.strip()).lower()
     return f"{clean}.md"
 
 
 def copy_images(source_dir: Path, server_dir: Path) -> None:
-    """把 source_dir/images 整体复制（或合并）到 server_dir/images。"""
+    """Copy (or merge) source_dir/images into server_dir/images."""
     src = source_dir / "images"
     if not src.is_dir():
-        logger.debug("无 images 子目录，跳过")
+        logger.debug("No images subdirectory found — skipping")
         return
     dst = server_dir / "images"
     if dst.exists():
@@ -529,7 +538,7 @@ def copy_images(source_dir: Path, server_dir: Path) -> None:
                     shutil.copy2(item, dst_f)
     else:
         shutil.copytree(src, dst)
-        logger.info(f"已复制 images → {dst}")
+        logger.info(f"Copied images → {dst}")
 
 
 def split_items_by_chapters(
@@ -537,17 +546,19 @@ def split_items_by_chapters(
     toc: list[dict],
 ) -> dict[str, list[dict]]:
     """
-    按 TOC 章节把 content_list items 分组。
+    Group content_list items by TOC chapter.
 
-    匹配策略（按优先级尝试）：
-    1. 单个 text_level=1 item 的 text 与章节标题完全匹配（忽略首尾空格、大小写）。
-    2. 同一页上相邻的若干 text_level=1 items 拼接后与章节标题匹配
-       （处理标题被拆成多行的情况，如 "FIVE-YEAR " + "FINANCIAL SUMMARY "）。
+    Matching strategy (tried in priority order):
+    1. A single text_level=1 item whose text exactly matches the chapter title
+       (ignoring leading/trailing whitespace and case).
+    2. Several consecutive text_level=1 items on the same page whose concatenated
+       text matches the chapter title (handles titles split across lines, e.g.
+       "FIVE-YEAR " + "FINANCIAL SUMMARY ").
 
-    返回字典，固定包含以下键：
-    - "pre_toc"  : TOC 页之前的 items（封面、股东通知等）
-    - "toc_page" : TOC 页本身的 items（原始文本/图片，仅供参考，不直接写出）
-    - 章节标题   : 对应章节的 items
+    The returned dict always contains these keys:
+    - "pre_toc"  : items before the TOC page (cover, shareholder notices, etc.)
+    - "toc_page" : items from the TOC page itself (kept for reference, not written)
+    - <chapter title> : items belonging to that chapter
     """
 
     def _norm(s: str) -> str:
@@ -556,14 +567,14 @@ def split_items_by_chapters(
     toc_titles = [entry["title"] for entry in toc]
     toc_norm   = {_norm(t): t for t in toc_titles}
 
-    # 找出 TOC 页的 page_idx（含 CONTENTS/目录 关键词的页）
+    # Identify TOC page_idx values (pages containing CONTENTS / 目录 keywords)
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
     toc_page_idxs: set[int] = set()
     for item in all_items:
         if item.get("type") == "text" and toc_kw.search((item.get("text") or "").strip()):
             toc_page_idxs.add(item["page_idx"])
 
-    # ---- 预处理：提取所有 text_level=1 的 item 位置（排除 TOC 页自身）----
+    # Pre-process: collect all text_level=1 item positions (excluding TOC pages)
     heading_items: list[tuple[int, dict]] = [
         (idx, item)
         for idx, item in enumerate(all_items)
@@ -572,7 +583,7 @@ def split_items_by_chapters(
         and item.get("page_idx") not in toc_page_idxs
     ]
 
-    # ---- 按页分组，尝试拼接匹配章节标题 ----
+    # Group by page and attempt concatenation matching
     chapter_starts: list[tuple[int, str]] = []
     already_matched: set[str] = set()
 
@@ -601,29 +612,30 @@ def split_items_by_chapters(
 
     result: dict[str, list[dict]] = {}
 
-    # 确定第一个章节的 item 位置（无匹配则取末尾）
+    # First chapter item position (fall back to end if no match)
     first_chapter_idx = chapter_starts[0][0] if chapter_starts else len(all_items)
 
-    # pre_toc：TOC 页之前的 items
+    # pre_toc: items before the first chapter (excluding TOC pages)
     result["pre_toc"] = [
         item for item in all_items[:first_chapter_idx]
         if item.get("page_idx") not in toc_page_idxs
     ]
 
-    # toc_page：TOC 页本身的原始 items（保留备查，不直接输出）
+    # toc_page: raw items from the TOC page (kept for reference, not written directly)
     result["toc_page"] = [
         item for item in all_items
         if item.get("page_idx") in toc_page_idxs
     ]
 
-    # 各章节 items
+    # Chapter items
     for i, (start_idx, title) in enumerate(chapter_starts):
         end_idx = chapter_starts[i + 1][0] if i + 1 < len(chapter_starts) else len(all_items)
         result[title] = all_items[start_idx:end_idx]
 
     missed = [t for t in toc_titles if t not in already_matched]
     if missed:
-        logger.warning(f"以下 {len(missed)} 个章节在 content_list 中未找到匹配（可能不在 demo 范围内）：")
+        logger.warning(f"{len(missed)} chapter(s) not matched in content_list "
+                       f"(may be outside the demo page range):")
         for t in missed:
             logger.warning(f"  - {t!r}")
 
@@ -631,28 +643,29 @@ def split_items_by_chapters(
 
 
 # ===========================================================================
-# 7. 主流程
+# 7. Main pipeline
 # ===========================================================================
 
 def build_toc_md(toc: list[dict], toc_page_items: list[dict], used_vision: bool) -> str:
     """
-    生成 toc.md 的内容。
+    Generate the content of toc.md.
 
-    两种场景：
-    - used_vision=True（或快速路径补全了所有条目）：
-        用 toc 列表直接生成 Markdown 表格，每个章节标题带相对链接。
-    - 快速路径（used_vision=False）：
-        先渲染 content_list 里 TOC 页的原始文本（保留原有排版），
-        再在下方附加带链接的导航表格。
-        原始文本区的章节名如能匹配到，也内联替换为链接。
+    Two scenarios:
+    - used_vision=True (or fast path covered all entries):
+        Generate a Markdown table directly from the toc list, with relative links
+        for each chapter title.
+    - Fast path (used_vision=False):
+        First render the raw text from the TOC page in content_list (preserving
+        original layout), then append a full navigation table with links below.
+        Chapter names found inline are replaced with links.
 
-    toc_page_items：split_items_by_chapters 返回的 "toc_page" 段。
+    toc_page_items: the "toc_page" segment returned by split_items_by_chapters.
     """
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
 
-    # ---- 构建链接表格（两种场景都输出）----
+    # Build the link table (output in both scenarios)
     link_rows: list[str] = [
-        "| 章节 | 页码 |",
+        "| Chapter | Page |",
         "| --- | --- |",
     ]
     for entry in toc:
@@ -661,11 +674,11 @@ def build_toc_md(toc: list[dict], toc_page_items: list[dict], used_vision: bool)
     link_table = "\n".join(link_rows)
 
     if used_vision:
-        # 视觉模型路径：只输出干净的链接表格（原 TOC 页文本不可信/不完整）
+        # Vision model path: output only the clean link table (raw TOC text is unreliable)
         return f"# Table of Contents\n\n{link_table}\n"
 
-    # 快速路径：先输出原始 TOC 页文本（内联章节链接），再附加完整导航表格
-    # 构建 title → filename 映射，用于内联替换
+    # Fast path: render original TOC page text (with inline chapter links),
+    # then append the full navigation table
     title_to_file = {e["title"]: chapter_to_filename(e["title"]) for e in toc}
 
     original_lines: list[str] = []
@@ -676,10 +689,10 @@ def build_toc_md(toc: list[dict], toc_page_items: list[dict], used_vision: bool)
         if not text:
             continue
         if toc_kw.search(text):
-            # 目录标题行本身，渲染为 H1
+            # TOC heading line itself — render as H1
             original_lines.append(f"# {text}\n")
             continue
-        # 尝试把行内的章节名替换为链接（匹配"标题  页码"格式）
+        # Replace inline chapter names with links ("Title  page_num" format)
         replaced = text
         for title, fname in title_to_file.items():
             if title in replaced:
@@ -705,56 +718,62 @@ def add_md_to_server_v2(
     keep_temp: bool = False,
 ) -> None:
     """
-    基于 content_list.json 把年报拆分输出到 server_dir。
+    Split an annual report into per-chapter files under server_dir, driven by
+    content_list.json.
 
-    生成文件：
-    - server_dir/index.md    封面前言（TOC 页之前的内容，不含目录）
-    - server_dir/toc.md      导航目录（章节链接表格；快速路径还保留原始目录排版）
-    - server_dir/<ch>.md     各章节正文
-    - server_dir/images/     图片资源
+    Output files:
+    - server_dir/index.md    front matter (content before TOC page, excluding TOC)
+    - server_dir/toc.md      navigation TOC (chapter link table; fast path also
+                              preserves original TOC layout)
+    - server_dir/<ch>.md     body of each chapter
+    - server_dir/images/     image assets
 
-    参数：
-        force_vision  True = 跳过快速文本解析，强制走视觉模型
-        keep_temp     True = 保留 PDF 渲染截图到 source_dir/debug_toc_render/，便于排查
+    Args:
+        force_vision: skip text fast path and always use the vision model.
+        keep_temp:    keep rendered PDF screenshots in source_dir/debug_toc_render/
+                      for debugging.
     """
-    logger.info(f"源目录  : {source_dir}")
-    logger.info(f"PDF     : {pdf_path}")
-    logger.info(f"输出目录: {server_dir}")
+    logger.info(f"Source dir : {source_dir}")
+    logger.info(f"PDF        : {pdf_path}")
+    logger.info(f"Output dir : {server_dir}")
 
-    # 1. 加载 content_list
+    # 1. Load content_list
     items = load_content_list(source_dir)
-    logger.info(f"已加载 content_list，共 {len(items)} 个 item")
+    logger.info(f"Loaded content_list with {len(items)} item(s)")
 
-    # 2. 获取目录
+    # 2. Retrieve TOC
     toc, used_vision = get_toc(items, pdf_path, source_dir, force_vision=force_vision, keep_temp=keep_temp)
 
-    logger.info(f"目录章节（共 {len(toc)} 个，来源：{'视觉模型/缓存' if used_vision else '文本解析'}）：")
+    logger.info(
+        f"TOC chapters ({len(toc)} total, source: "
+        f"{'vision model / cache' if used_vision else 'text parsing'}):"
+    )
     for entry in toc:
         logger.info(f"  p.{entry['page']:>4}  {entry['title']}")
 
-    # 3. 创建输出目录
+    # 3. Create output directory
     server_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. 按章节分组 items
+    # 4. Group items by chapter
     sections = split_items_by_chapters(items, toc)
     matched_count = sum(1 for k in sections if k not in ("pre_toc", "toc_page"))
-    logger.info(f"成功匹配 {matched_count} 个章节")
+    logger.info(f"Successfully matched {matched_count} chapter(s)")
 
-    # 5. 写 index.md（纯前言：TOC 页之前的内容）
+    # 5. Write index.md (front matter: content before the TOC page)
     pre_toc_items = sections.get("pre_toc", [])
     index_md = build_markdown_from_items(pre_toc_items).strip()
     index_path = server_dir / "index.md"
     index_path.write_text(index_md + "\n", encoding="utf-8")
-    logger.info(f"已写入 index.md（{len(index_md)} 字节，{len(pre_toc_items)} items）")
+    logger.info(f"Wrote index.md ({len(index_md)} bytes, {len(pre_toc_items)} items)")
 
-    # 6. 写 toc.md（带链接的导航目录）
+    # 6. Write toc.md (navigation TOC with links)
     toc_page_items = sections.get("toc_page", [])
     toc_md = build_toc_md(toc, toc_page_items, used_vision=used_vision)
     toc_path = server_dir / "toc.md"
     toc_path.write_text(toc_md, encoding="utf-8")
-    logger.info(f"已写入 toc.md（{'视觉模型链接表格' if used_vision else '原始文本 + 链接表格'}）")
+    logger.info(f"Wrote toc.md ({'vision model link table' if used_vision else 'raw text + link table'})")
 
-    # 7. 写各章节 .md
+    # 7. Write per-chapter .md files
     saved = 0
     for entry in toc:
         title    = entry["title"]
@@ -762,35 +781,37 @@ def add_md_to_server_v2(
         chapter_items = sections.get(title)
 
         if not chapter_items:
-            logger.warning(f"  [跳过] 无内容: {title!r}")
+            logger.warning(f"  [skip] no content for: {title!r}")
             continue
 
         chapter_md = build_markdown_from_items(chapter_items)
         out_path = server_dir / filename
         out_path.write_text(chapter_md.strip() + "\n", encoding="utf-8")
-        logger.info(f"  已写入 {filename}（{len(chapter_md)} 字节，{len(chapter_items)} items）")
+        logger.info(f"  Wrote {filename} ({len(chapter_md)} bytes, {len(chapter_items)} items)")
         saved += 1
 
-    logger.info(f"章节写入完成：{saved} / {len(toc)}")
+    logger.info(f"Chapters written: {saved} / {len(toc)}")
 
-    # 8. 复制图片
+    # 8. Copy images
     copy_images(source_dir, server_dir)
 
-    logger.info("✓ 全部完成")
+    logger.info("✓ Done")
 
 
 # ===========================================================================
-# 入口
+# Entry point
 # ===========================================================================
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="add_md_to_server_v2: 基于 content_list.json 拆分年报")
-    parser.add_argument("--doc",          default=DOC_NAME,        help="文档名称（pdf-demo-output 子目录名）")
-    parser.add_argument("--force-vision", action="store_true",     help="强制走视觉模型，跳过文本解析快速路径")
-    parser.add_argument("--keep-temp",    action="store_true",     help="保留 PDF 渲染截图到 source_dir/debug_toc_render/，便于排查")
-    parser.add_argument("--vision-model", default=None,            help="覆盖 VISION_MODEL 环境变量")
+    parser = argparse.ArgumentParser(
+        description="add_md_to_server_v2: split an annual report using content_list.json"
+    )
+    parser.add_argument("--doc",          default=DOC_NAME,    help="document name (subdirectory under pdf-demo-output)")
+    parser.add_argument("--force-vision", action="store_true", help="skip text fast path and force vision model")
+    parser.add_argument("--keep-temp",    action="store_true", help="keep rendered PDF screenshots in source_dir/debug_toc_render/")
+    parser.add_argument("--vision-model", default=None,        help="override VISION_MODEL env variable")
     args = parser.parse_args()
 
     if args.vision_model:
