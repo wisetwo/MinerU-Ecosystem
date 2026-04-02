@@ -3,5 +3,6 @@
 
 # Test output directory
 tests/pdf-demo-output/
+tests/server/
 
 __pycache__/
