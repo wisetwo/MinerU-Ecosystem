@@ -25,8 +25,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 TESTS_DIR = Path(__file__).parent
 
-SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / "拼多多-PDD-2024年年报-demo"
-DOC_NAME   = "拼多多-PDD-2024年年报-demo"
+SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / "小米集团-1810-2024年年报-demo"
+DOC_NAME   = "小米集团-1810-2024年年报-demo"
 MAIN_MD    = SOURCE_DIR / f"{DOC_NAME}.md"
 SERVER_DIR = TESTS_DIR / "server" / DOC_NAME
 
