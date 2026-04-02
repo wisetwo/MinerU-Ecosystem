@@ -87,7 +87,12 @@ def load_content_list(source_dir: Path) -> list[dict]:
     path = source_dir / "content_list.json"
     if not path.exists():
         raise FileNotFoundError(f"content_list.json not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    items = json.loads(path.read_text(encoding="utf-8"))
+    # Stamp each item with its original array index so downstream renderers can
+    # emit <!-- index: N --> comments for traceability.
+    for i, item in enumerate(items):
+        item["_index"] = i
+    return items
 
 
 def find_toc_pages(items: list[dict]) -> list[int]:
@@ -485,60 +490,72 @@ def prettify_html_tables(content: str) -> str:
 
 
 def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
-    """Convert a single content_list item to a Markdown string."""
+    """Convert a single content_list item to a Markdown string.
+
+    When the item carries an ``_index`` field (stamped by ``load_content_list``),
+    a ``<!-- index: N -->`` comment is prepended to the rendered content so that
+    every block in the output can be traced back to its position in the original
+    content_list.json array.  The comment is omitted when the item produces no
+    visible output (e.g. skipped headers / page numbers).
+    """
     t = item.get("type", "")
 
-    if t == "text":
-        text  = (item.get("text") or "").rstrip()
-        level = item.get("text_level")
-        if level == 1:
-            return f"# {text}\n"
-        return f"{text}\n"
-
     if t in ("header"):
-        # Running page headers/footers and page numbers add no content value
+        # Running page headers/footers add no content value
         return ""
 
     if t == "page_number":
         text = (item.get("text") or "").strip()
-        return f"\n<!--Page Number: {text}-->\n"
-
-    if t == "page_footnote":
+        body = f"\n<!-- page: {text} -->\n" if text else ""
+    elif t == "text":
+        text  = (item.get("text") or "").rstrip()
+        level = item.get("text_level")
+        body  = (f"# {text}\n" if level == 1 else f"{text}\n") if text else ""
+    elif t == "page_footnote":
         text = (item.get("text") or "").strip()
-        return f"\n---\n*{text}*\n" if text else ""
-
-    if t == "image":
+        body = f"\n---\n*{text}*\n" if text else ""
+    elif t == "image":
         img_path = item.get("img_path", "")
         captions = item.get("image_caption") or []
         caption_text = " ".join(captions).strip()
         alt = caption_text or "image"
-        return f"\n![{alt}]({img_path})\n"
-
-    if t == "table":
+        body = f"\n![{alt}]({img_path})\n"
+    elif t == "table":
         parts: list[str] = []
         captions = item.get("table_caption") or []
         if captions:
             parts.append("\n**" + " ".join(captions).strip() + "**\n")
-        body = item.get("table_body", "")
-        if body:
-            parts.append(prettify_html_tables(body))
+        table_body = item.get("table_body", "")
+        if table_body:
+            parts.append(prettify_html_tables(table_body))
         footnotes = item.get("table_footnote") or []
         for fn in footnotes:
             if fn.strip():
                 parts.append(f"*{fn.strip()}*\n")
-        return "\n".join(parts) + "\n"
-
-    if t == "list":
+        body = "\n".join(parts) + "\n"
+    elif t == "list":
         lines: list[str] = []
         for li in item.get("list_items") or []:
             li = li.strip()
             if li:
                 lines.append(f"- {li}")
-        return "\n".join(lines) + "\n" if lines else ""
+        body = "\n".join(lines) + "\n" if lines else ""
+    else:
+        # Unknown type — degrade to plain text
+        raw = item.get("text", "")
+        body = f"{raw}\n" if raw else ""
 
-    # Unknown type — degrade to plain text
-    text = item.get("text", "")
-    return f"{text}\n" if text else ""
+    if not body:
+        return ""
+
+    # Prepend the original content_list array index as an HTML comment so that
+    # every rendered block can be traced back to its source item.
+    # page_number items are structural markers only — no id comment needed.
+    if t == "page_number":
+        return body
+    idx = item.get("_index")
+    prefix = f"<!-- id: {idx} -->\n" if idx is not None else ""
+    return prefix + body
 
 
 def build_markdown_from_items(items: list[dict]) -> str:
