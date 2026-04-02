@@ -65,8 +65,10 @@ SOURCE_DIR = TESTS_DIR / "pdf-demo-output" / DOC_NAME
 PDF_PATH   = TESTS_DIR / "pdf-demo" / f"{DOC_NAME}.pdf"
 SERVER_DIR = TESTS_DIR / "server" / DOC_NAME
 
-# Vision model cache file (avoids redundant API calls)
-LLM_CACHE_FILE = SOURCE_DIR / f"{DOC_NAME}__toc_by_vision.json"
+# Cache files – text fast path and vision model results are stored separately so
+# that a (potentially incomplete) text parse never overwrites a vision result.
+VISION_CACHE_FILE = SOURCE_DIR / f"{DOC_NAME}__toc_by_vision.json"
+TEXT_CACHE_FILE   = SOURCE_DIR / f"{DOC_NAME}__toc_by_text.json"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -166,16 +168,67 @@ _TOC_LINE_RE = re.compile(
 )
 
 
-def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
+class TextTocResult:
+    """Container for text-parsed TOC with quality metadata."""
+    def __init__(self, chapters: list[dict], total_lines: int, matched_lines: int):
+        self.chapters = chapters
+        self.total_lines = total_lines
+        self.matched_lines = matched_lines
+
+    @property
+    def match_rate(self) -> float:
+        return self.matched_lines / self.total_lines if self.total_lines > 0 else 0.0
+
+    @property
+    def is_confident(self) -> bool:
+        """
+        Return True only when the text parse is highly confident:
+        - At least 1 chapter parsed
+        - **100% match rate** — every non-heading text line on the TOC page
+          was successfully parsed.  Any miss means some chapters may be lost,
+          so we fall back to the vision model for safety.
+        - At least 3 chapters (too few = suspicious)
+        - Page numbers are monotonically non-decreasing (sanity check)
+        """
+        if not self.chapters:
+            return False
+        if self.matched_lines != self.total_lines:
+            # Any unmatched line means potential data loss → not confident
+            return False
+        if len(self.chapters) < 3:
+            return False
+        pages = [c["page"] for c in self.chapters]
+        if pages != sorted(pages):
+            return False
+        return True
+
+    @property
+    def reason(self) -> str:
+        """Human-readable reason when confidence is low."""
+        if not self.chapters:
+            return "no chapters parsed"
+        reasons = []
+        if self.matched_lines != self.total_lines:
+            reasons.append(
+                f"not all lines matched {self.matched_lines}/{self.total_lines} "
+                f"({self.match_rate:.0%})"
+            )
+        if len(self.chapters) < 3:
+            reasons.append(f"too few chapters ({len(self.chapters)})")
+        pages = [c["page"] for c in self.chapters]
+        if pages != sorted(pages):
+            reasons.append("page numbers not monotonically increasing")
+        return "; ".join(reasons) if reasons else "unknown"
+
+
+def parse_toc_from_text_items(toc_items: list[dict]) -> TextTocResult:
     """
     Try to extract chapter information directly from TOC-page text items.
     Each item.text typically looks like "CHAPTER TITLE  12 ".
 
-    Returns [{"title": "...", "page": int}, ...].
-    Returns an empty list (triggering the vision-model fallback) when:
-    - no entries were parsed, or
-    - valid matches cover less than 50% of non-empty text lines
-      (indicating that page numbers were rendered as images).
+    Returns a *TextTocResult* that carries both the parsed chapters and quality
+    metadata.  The caller should inspect ``result.is_confident`` to decide
+    whether to trust the text parse or fall back to the vision model.
     """
     results: list[dict] = []
     toc_kw = re.compile(r'目\s*录|^contents\s*$|table\s+of\s+contents', re.IGNORECASE)
@@ -199,16 +252,7 @@ def parse_toc_from_text_items(toc_items: list[dict]) -> list[dict]:
                 "page":  int(m.group("page")),
             })
 
-    # Quality check: if match rate < 50%, many page numbers were rendered as images
-    total = len(non_toc_header_texts)
-    if total > 0 and len(results) < total * 0.5:
-        logger.info(
-            f"Fast path matched only {len(results)}/{total} TOC entries"
-            " (some page numbers may be rendered as images) — falling back to vision model"
-        )
-        return []
-
-    return results
+    return TextTocResult(results, total_lines=len(non_toc_header_texts), matched_lines=len(results))
 
 
 # ===========================================================================
@@ -382,37 +426,79 @@ def get_toc(
     """
     Retrieve the chapter list from the TOC.
 
+    Resolution order:
+    1. If a **vision cache** exists → use it directly (most reliable).
+    2. Try the **text fast path**.  If the result is *confident* (high match
+       rate, enough chapters, sane page order) → save to text cache and return.
+    3. Otherwise fall back to the **vision model**, save to vision cache.
+
+    Setting ``force_vision=True`` skips both caches and the text path.
+
     Returns (chapters, used_vision):
     - chapters    : [{"title": str, "page": int}, ...]
     - used_vision : True if the result came from the vision model (or its cache),
-                    False if it came from the text fast path.
+                    False if it came from a confident text fast path.
     """
-    cache_file = LLM_CACHE_FILE
+    vision_cache = VISION_CACHE_FILE
+    text_cache   = TEXT_CACHE_FILE
 
-    # Cache hit (from a previous vision model call)
-    if cache_file.exists() and not force_vision:
-        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+    # ── 1. Vision cache hit (highest trust) ─────────────────────────────
+    if vision_cache.exists() and not force_vision:
+        cached = json.loads(vision_cache.read_text(encoding="utf-8"))
         if isinstance(cached, list) and cached:
-            logger.info(f"Using TOC cache: {cache_file.name} ({len(cached)} chapters)")
-            return cached, True  # cache originates from vision model
+            logger.info(f"Using vision cache: {vision_cache.name} ({len(cached)} chapters)")
+            return cached, True
 
-    # Locate TOC pages
+    # ── 2. Text fast path ───────────────────────────────────────────────
     toc_pages = find_toc_pages(items)
     if not toc_pages:
         raise ValueError("No TOC page found in content_list (expected CONTENTS / 目录 keyword)")
     logger.info(f"Detected TOC page_idx(s): {toc_pages}")
 
-    # Fast path: parse chapters directly from text items
     if not force_vision:
-        toc_items = items_on_pages(items, toc_pages)
-        chapters = parse_toc_from_text_items(toc_items)
-        if chapters:
-            logger.info(f"Parsed {len(chapters)} chapters from content_list text (fast path)")
-            _save_toc_cache(cache_file, chapters)
-            return chapters, False  # text-parsed, not vision
-        logger.info("Text parsing yielded 0 chapters — switching to vision model")
+        # Check text cache first
+        if text_cache.exists():
+            cached = json.loads(text_cache.read_text(encoding="utf-8"))
+            if isinstance(cached, list) and cached:
+                logger.info(f"Using text cache: {text_cache.name} ({len(cached)} chapters)")
+                # Text cache exists but we still need to verify confidence.
+                # Re-parse to get quality metrics.
+                toc_items = items_on_pages(items, toc_pages)
+                result = parse_toc_from_text_items(toc_items)
+                if result.is_confident:
+                    return cached, False
 
-    # Slow path: vision model
+                logger.info(
+                    f"Text cache exists but confidence is low ({result.reason}) "
+                    "— falling back to vision model"
+                )
+                # Fall through to vision model
+
+        else:
+            # No text cache — try parsing now
+            toc_items = items_on_pages(items, toc_pages)
+            result = parse_toc_from_text_items(toc_items)
+
+            if result.is_confident:
+                logger.info(
+                    f"Parsed {len(result.chapters)} chapters from content_list text "
+                    f"(fast path, match rate {result.match_rate:.0%})"
+                )
+                _save_toc_cache(text_cache, result.chapters)
+                return result.chapters, False
+
+            if result.chapters:
+                # Parsed something but not confident — save to text cache for
+                # reference, but fall through to vision model.
+                _save_toc_cache(text_cache, result.chapters)
+                logger.info(
+                    f"Text fast path parsed {len(result.chapters)} chapters but "
+                    f"confidence is low ({result.reason}) — falling back to vision model"
+                )
+            else:
+                logger.info("Text parsing yielded 0 chapters — falling back to vision model")
+
+    # ── 3. Vision model (slow path) ─────────────────────────────────────
     if not pdf_path.exists():
         raise FileNotFoundError(
             f"Original PDF needed to render TOC screenshots but not found: {pdf_path}\n"
@@ -443,7 +529,7 @@ def get_toc(
     if not chapters:
         raise ValueError("Vision model returned no chapters — check TOC screenshots or model config")
 
-    _save_toc_cache(cache_file, chapters)
+    _save_toc_cache(vision_cache, chapters)
     return chapters, True  # vision model path
 
 
@@ -781,8 +867,7 @@ def add_md_to_server_v2(
 
     Output files:
     - server_dir/index.md    front matter (content before TOC page, excluding TOC)
-    - server_dir/toc.md      navigation TOC (chapter link table; fast path also
-                              preserves original TOC layout)
+    - server_dir/toc.md      navigation TOC (chapter link table)
     - server_dir/<ch>.md     body of each chapter
     - server_dir/images/     image assets
 
@@ -829,7 +914,7 @@ def add_md_to_server_v2(
     toc_md = build_toc_md(toc, toc_page_items, used_vision=used_vision)
     toc_path = server_dir / "toc.md"
     toc_path.write_text(toc_md, encoding="utf-8")
-    logger.info(f"Wrote toc.md ({'vision model link table' if used_vision else 'raw text + link table'})")
+    logger.info(f"Wrote toc.md (source: {'vision model' if used_vision else 'text fast path'})")
 
     # 7. Write per-chapter .md files
     saved = 0
@@ -879,7 +964,8 @@ if __name__ == "__main__":
         _src = TESTS_DIR / "pdf-demo-output" / args.doc
         _pdf = TESTS_DIR / "pdf-demo" / f"{args.doc}.pdf"
         _srv = TESTS_DIR / "server" / args.doc
-        LLM_CACHE_FILE = _src / f"{args.doc}__toc_by_vision.json"
+        VISION_CACHE_FILE = _src / f"{args.doc}__toc_by_vision.json"
+        TEXT_CACHE_FILE   = _src / f"{args.doc}__toc_by_text.json"
         add_md_to_server_v2(
             source_dir=_src,
             pdf_path=_pdf,
