@@ -730,14 +730,10 @@ def build_toc_md(toc: list[dict], toc_page_items: list[dict], used_vision: bool)
     """
     Generate the content of toc.md.
 
-    Two scenarios:
-    - used_vision=True (or fast path covered all entries):
-        Generate a Markdown table directly from the toc list, with relative links
-        for each chapter title.
-    - Fast path (used_vision=False):
-        First render the raw text from the TOC page in content_list (preserving
-        original layout), then append a full navigation table with links below.
-        Chapter names found inline are replaced with links.
+    Both the vision model path and the text fast path produce the same clean
+    Markdown link table.  The only difference is the heading: the fast path
+    extracts the original heading text from the TOC page (e.g. "CONTENTS" /
+    "目录"), while the vision path uses a fixed "Table of Contents".
 
     toc_page_items: the "toc_page" segment returned by split_items_by_chapters.
     """
@@ -757,37 +753,19 @@ def build_toc_md(toc: list[dict], toc_page_items: list[dict], used_vision: bool)
         # Vision model path: output only the clean link table (raw TOC text is unreliable)
         return f"# Table of Contents\n\n{link_table}\n"
 
-    # Fast path: render original TOC page text (with inline chapter links),
-    # then append the full navigation table
-    title_to_file = {e["title"]: chapter_to_filename(e["title"]) for e in toc}
-
-    original_lines: list[str] = []
+    # Fast path: also output only the clean link table to avoid duplicating
+    # chapter entries (original TOC text + navigation table).
+    # Extract the heading from the TOC page (e.g. "CONTENTS" / "目录") if present.
+    toc_heading = "CONTENTS"
     for item in toc_page_items:
         if item.get("type") != "text":
             continue
         text = (item.get("text") or "").strip()
-        if not text:
-            continue
-        if toc_kw.search(text):
-            # TOC heading line itself — render as H1
-            original_lines.append(f"# {text}\n")
-            continue
-        # Replace inline chapter names with links ("Title  page_num" format)
-        replaced = text
-        for title, fname in title_to_file.items():
-            if title in replaced:
-                replaced = replaced.replace(title, f"[{title}](./{fname})")
-                break
-        original_lines.append(replaced)
+        if text and toc_kw.search(text):
+            toc_heading = text
+            break
 
-    original_block = "\n".join(original_lines)
-
-    return (
-        f"{original_block}\n\n"
-        f"---\n\n"
-        f"## Navigation\n\n"
-        f"{link_table}\n"
-    )
+    return f"# {toc_heading}\n\n{link_table}\n"
 
 
 def add_md_to_server_v2(
