@@ -545,32 +545,43 @@ def _save_toc_cache(cache_file: Path, chapters: list[dict]) -> None:
 # ===========================================================================
 
 def prettify_html_tables(content: str) -> str:
-    """Expand single-line HTML tables into indented multi-line format (consistent with v1)."""
+    """Expand single-line HTML tables into indented multi-line format.
+
+    Uses BeautifulSoup for robust HTML formatting — avoids hand-rolled indent
+    bugs when ``<td>``/``<th>`` content spans multiple lines.
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        # Fallback: return original content unchanged if bs4 is not installed.
+        logger.warning("beautifulsoup4 is not installed; skipping table prettification.")
+        return content
 
     def _prettify_one(m: re.Match) -> str:
         raw = m.group(0)
-        spaced = re.sub(r">\s*<", ">\n<", raw)
-        lines = spaced.split("\n")
-        result: list[str] = []
-        indent = 0
-
+        soup = BeautifulSoup(raw, "html.parser")
+        # soup.prettify() indents with 1 space by default; use 2 spaces.
+        pretty = soup.prettify(formatter="minimal")
+        # Normalise indent from 1-space (bs4 default) to 2-space.
+        lines: list[str] = []
+        for line in pretty.splitlines():
+            stripped = line.lstrip(" ")
+            depth = len(line) - len(stripped)
+            lines.append("  " * depth + stripped)
+        # Collapse empty <td>/<th>: put closing tag on same line as opening tag.
+        collapsed: list[str] = []
         for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if re.match(r"^</(table|thead|tbody|tfoot|tr|th|td)>", line, re.IGNORECASE):
-                if result:
-                    prev = result[-1].strip()
-                    if re.match(r"^<(td|th)(\s[^>]*)?>$", prev, re.IGNORECASE):
-                        result[-1] = result[-1] + line
-                        indent -= 1
-                        continue
-                indent -= 1
-            result.append("  " * indent + line)
-            if re.match(r"^<(table|thead|tbody|tfoot|tr|th|td)(\s[^>]*)?>(?!.*</\1>)", line, re.IGNORECASE):
-                indent += 1
-
-        return "\n" + "\n".join(result) + "\n"
+            s = line.strip()
+            if collapsed:
+                prev_s = collapsed[-1].strip()
+                # Match a closing tag whose opening tag is the previous line with nothing in between.
+                if re.match(r"^</(td|th)>$", s, re.IGNORECASE) and re.match(
+                    r"^<(td|th)(\s[^>]*)?>$", prev_s, re.IGNORECASE
+                ):
+                    collapsed[-1] = collapsed[-1] + s
+                    continue
+            collapsed.append(line)
+        return "\n" + "\n".join(collapsed) + "\n"
 
     return re.sub(r"<table>.*?</table>", _prettify_one, content, flags=re.DOTALL | re.IGNORECASE)
 
