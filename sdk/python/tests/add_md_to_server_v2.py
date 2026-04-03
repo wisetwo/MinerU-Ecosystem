@@ -620,6 +620,9 @@ def item_to_markdown(item: dict, images_rel_prefix: str = "images") -> str:
     elif t == "table":
         parts: list[str] = []
         captions = item.get("table_caption") or []
+        table_image = item.get("img_path", "")
+        if table_image:
+            parts.append(f"\n![table source image]({table_image})\n")
         if captions:
             parts.append("\n**" + " ".join(captions).strip() + "**\n")
         table_body = item.get("table_body", "")
